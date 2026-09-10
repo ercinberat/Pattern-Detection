@@ -84,7 +84,14 @@ Plus swing-trading-specific features:
 - Gap-through-pattern flag (gap vs. gradual breakout)
 - Earnings-date proximity (if trading single names)
 
-- **Status:** not started. Next concrete build step.
+- **Status:** in progress (`src/indicators.py`). Combination #1
+  (Bollinger Band squeeze + volume surge) is built:
+  `compute_bollinger_bands()` returns the full band series for charting,
+  and `bollinger_squeeze_and_volume_surge(price_data, pattern)` evaluates
+  the squeeze/surge at a given pattern's end date and returns a feature
+  dict. Wired into `main.py` - prints each detected pattern's features and
+  draws the bands on the chart. Combinations #2-5 and the
+  swing-trading-specific features are not built yet.
 
 ### Stage 5 — Labeling
 - For each detected pattern, label the outcome: did price move > X% within

@@ -62,6 +62,25 @@ def _triangle_trendlines(price_data: pd.DataFrame, triangle: TrianglePattern):
     return [upper_line, lower_line]
 
 
+def _month_start_ticks(price_data: pd.DataFrame):
+    """
+    Find the bar position (0, 1, 2, ...) of the first trading day of every
+    calendar month in price_data, along with a "Year Mon" label for each -
+    used to give the x-axis one tick per month instead of mplfinance's
+    default, sparser auto-spacing.
+    """
+    # to_period() doesn't accept a timezone-aware index (yfinance returns
+    # one), so drop the timezone first - it doesn't affect which calendar
+    # month/day each bar falls on.
+    naive_dates = price_data.index.tz_localize(None)
+    year_month = pd.Series(naive_dates.to_period("M"), index=price_data.index)
+    is_month_start = year_month != year_month.shift(1)
+
+    tick_positions = [position for position, is_start in enumerate(is_month_start) if is_start]
+    tick_labels = [price_data.index[position].strftime("%Y %b") for position in tick_positions]
+    return tick_positions, tick_labels
+
+
 def _bull_flag_lines(price_data: pd.DataFrame, bull_flag: BullFlagPattern):
     """
     Build the pole line (from the pole's start close to its end close)
@@ -91,6 +110,7 @@ def plot_chart(
     ticker: str = "",
     pivots: pd.DataFrame = None,
     patterns=None,
+    bollinger_bands: pd.DataFrame = None,
     extra_panels=None,
     save_path: str = None,
 ):
@@ -108,10 +128,16 @@ def plot_chart(
         detect_triangles()/detect_bull_flags() output). Triangle trendlines
         are drawn as two converging lines; bull flags are drawn as a pole
         line plus a box around the flag consolidation.
-    extra_panels: reserved for Stage 4 (confirmation indicators). Once
-        indicators.py exists, this will hold indicator series (RSI, MACD,
-        ADX, etc.) to stack as extra panels below the price panel. Ignored
-        for now.
+    bollinger_bands: optional output of indicators.py's
+        compute_bollinger_bands() (Stage 4) - a DataFrame with the same
+        index as price_data plus upper_band/lower_band columns. When
+        given, the bands are drawn directly on the price panel, so a
+        squeeze (bands pinching together) can be seen alongside any
+        triangle contracting at the same time.
+    extra_panels: reserved for the rest of Stage 4's confirmation
+        indicators. Once more of indicators.py exists, this will hold
+        series (RSI, MACD, ADX, etc.) to stack as extra panels below the
+        price panel. Ignored for now.
     save_path: if given, saves the chart image permanently to this file
         path (e.g. for building up a folder of chart images). If not
         given, the chart is saved to a temporary image and opened
@@ -129,8 +155,17 @@ def plot_chart(
         title=chart_title,
         ylabel="Price ($)",
         ylabel_lower="Volume",
-        figsize=(12, 7),
+        # Wider than a plain 12x7 figure, since showing one label per
+        # calendar month (see _month_start_ticks below) means a couple of
+        # dozen labels need to fit rather than mplfinance's usual handful.
+        figsize=(18, 7),
+        returnfig=True,
     )
+
+    # Built up across the pivots/bollinger_bands sections below, since
+    # both draw onto the price panel using mplfinance's scatter/line
+    # overlay mechanism ("addplot") and need to share the same list.
+    overlay_plots = []
 
     if pivots is not None:
         # Draw swing highs as downward triangles and swing lows as upward
@@ -138,25 +173,39 @@ def plot_chart(
         # mplfinance's scatter overlay ("addplot"). Each series lines up
         # with price_data bar-for-bar, with NaN on every non-pivot bar, so
         # only the actual pivot bars get a marker drawn.
-        pivot_markers = [
-            mpf.make_addplot(
-                pivots["swing_high"],
-                type="scatter",
-                marker="v",
-                markersize=200,
-                color="#ffa726",
-                edgecolors="black",
-            ),
-            mpf.make_addplot(
-                pivots["swing_low"],
-                type="scatter",
-                marker="^",
-                markersize=200,
-                color="#42a5f5",
-                edgecolors="black",
-            ),
-        ]
-        plot_kwargs["addplot"] = pivot_markers
+        overlay_plots.extend(
+            [
+                mpf.make_addplot(
+                    pivots["swing_high"],
+                    type="scatter",
+                    marker="v",
+                    markersize=200,
+                    color="#ffa726",
+                    edgecolors="black",
+                ),
+                mpf.make_addplot(
+                    pivots["swing_low"],
+                    type="scatter",
+                    marker="^",
+                    markersize=200,
+                    color="#42a5f5",
+                    edgecolors="black",
+                ),
+            ]
+        )
+
+    if bollinger_bands is not None:
+        # Thin grey lines so the bands read as context rather than
+        # competing visually with the candles/pivot markers/pattern lines.
+        overlay_plots.extend(
+            [
+                mpf.make_addplot(bollinger_bands["upper_band"], color="#787b86", width=0.8),
+                mpf.make_addplot(bollinger_bands["lower_band"], color="#787b86", width=0.8),
+            ]
+        )
+
+    if overlay_plots:
+        plot_kwargs["addplot"] = overlay_plots
 
     if patterns:
         # Triangle trendlines are drawn in purple, bull flag pole/box
@@ -177,17 +226,28 @@ def plot_chart(
         if line_segments:
             plot_kwargs["alines"] = dict(alines=line_segments, colors=line_colors, linewidths=[1.5] * len(line_segments))
 
+    fig, axes = mpf.plot(price_data, **plot_kwargs)
+
+    # mplfinance's default x-axis uses bar position (0, 1, 2, ...), not
+    # real dates, and auto-picks a handful of tick positions itself. To
+    # get one label per calendar month instead, override the ticks on
+    # every returned axis with our own month-start positions - only the
+    # bottom-most (visible) panel's labels actually get shown, but setting
+    # it on all of them is simple and safe either way.
+    tick_positions, tick_labels = _month_start_ticks(price_data)
+    for axis in axes:
+        axis.set_xticks(tick_positions)
+        axis.set_xticklabels(tick_labels, rotation=45, ha="right")
+
     if save_path:
-        plot_kwargs["savefig"] = save_path
-        mpf.plot(price_data, **plot_kwargs)
+        fig.savefig(save_path, bbox_inches="tight")
     else:
         # No permanent save path given: render to a temporary PNG and open
         # it in the default image viewer, so the chart still "pops up"
         # without relying on matplotlib's interactive window.
         temp_image = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         temp_image.close()
-        plot_kwargs["savefig"] = temp_image.name
-        mpf.plot(price_data, **plot_kwargs)
+        fig.savefig(temp_image.name, bbox_inches="tight")
         os.startfile(temp_image.name)
 
 
