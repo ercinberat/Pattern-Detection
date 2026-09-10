@@ -15,6 +15,8 @@ import tempfile
 import mplfinance as mpf
 import pandas as pd
 
+from src.patterns import BullFlagPattern, TrianglePattern
+
 
 # A dark color scheme close to TradingView's default look: dark background,
 # teal/red candles for up/down days, and a subtle dashed grid.
@@ -40,6 +42,50 @@ _TRADINGVIEW_STYLE = mpf.make_mpf_style(
 )
 
 
+def _triangle_trendlines(price_data: pd.DataFrame, triangle: TrianglePattern):
+    """
+    Build the upper and lower trendline segments for one detected
+    triangle, evaluating its fitted line equations at the bar positions
+    of its start and end dates.
+    """
+    start_position = price_data.index.get_loc(triangle.start_date)
+    end_position = price_data.index.get_loc(triangle.end_date)
+
+    upper_line = [
+        (triangle.start_date, triangle.high_slope * start_position + triangle.high_intercept),
+        (triangle.end_date, triangle.high_slope * end_position + triangle.high_intercept),
+    ]
+    lower_line = [
+        (triangle.start_date, triangle.low_slope * start_position + triangle.low_intercept),
+        (triangle.end_date, triangle.low_slope * end_position + triangle.low_intercept),
+    ]
+    return [upper_line, lower_line]
+
+
+def _bull_flag_lines(price_data: pd.DataFrame, bull_flag: BullFlagPattern):
+    """
+    Build the pole line (from the pole's start close to its end close)
+    and the flag-range box outline (top and bottom of the consolidation)
+    for one detected bull flag.
+    """
+    pole_start_price = price_data.loc[bull_flag.pole_start_date, "Close"]
+    pole_end_price = price_data.loc[bull_flag.pole_end_date, "Close"]
+
+    pole_line = [
+        (bull_flag.pole_start_date, pole_start_price),
+        (bull_flag.pole_end_date, pole_end_price),
+    ]
+    flag_top = [
+        (bull_flag.flag_start_date, bull_flag.flag_high),
+        (bull_flag.flag_end_date, bull_flag.flag_high),
+    ]
+    flag_bottom = [
+        (bull_flag.flag_start_date, bull_flag.flag_low),
+        (bull_flag.flag_end_date, bull_flag.flag_low),
+    ]
+    return [pole_line, flag_top, flag_bottom]
+
+
 def plot_chart(
     price_data: pd.DataFrame,
     ticker: str = "",
@@ -58,9 +104,10 @@ def plot_chart(
         the same index as price_data plus swing_high/swing_low columns.
         When given, swing highs/lows are marked directly on the price
         panel so pivot detection can be sanity-checked visually.
-    patterns: reserved for Stage 3 (triangle/flag detection). Once patterns
-        are detected, this will hold them so their trendlines and
-        pole/flag zones can be drawn on the price panel. Ignored for now.
+    patterns: optional list of TrianglePattern/BullFlagPattern (Stage 3's
+        detect_triangles()/detect_bull_flags() output). Triangle trendlines
+        are drawn as two converging lines; bull flags are drawn as a pole
+        line plus a box around the flag consolidation.
     extra_panels: reserved for Stage 4 (confirmation indicators). Once
         indicators.py exists, this will hold indicator series (RSI, MACD,
         ADX, etc.) to stack as extra panels below the price panel. Ignored
@@ -110,6 +157,25 @@ def plot_chart(
             ),
         ]
         plot_kwargs["addplot"] = pivot_markers
+
+    if patterns:
+        # Triangle trendlines are drawn in purple, bull flag pole/box
+        # lines in green, so the two pattern types stay visually distinct
+        # from each other and from the orange/blue pivot markers above.
+        line_segments = []
+        line_colors = []
+        for pattern in patterns:
+            if isinstance(pattern, TrianglePattern):
+                segments = _triangle_trendlines(price_data, pattern)
+                line_segments.extend(segments)
+                line_colors.extend(["#ab47bc"] * len(segments))
+            elif isinstance(pattern, BullFlagPattern):
+                segments = _bull_flag_lines(price_data, pattern)
+                line_segments.extend(segments)
+                line_colors.extend(["#66bb6a"] * len(segments))
+
+        if line_segments:
+            plot_kwargs["alines"] = dict(alines=line_segments, colors=line_colors, linewidths=[1.5] * len(line_segments))
 
     if save_path:
         plot_kwargs["savefig"] = save_path

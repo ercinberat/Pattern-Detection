@@ -41,7 +41,30 @@ The project has three layers:
   symmetrical/ascending/descending.
 - **Bullish flags:** detect a sharp "pole" move followed by a tight,
   low-volatility, low-volume "flag" consolidation.
-- **Status:** not started.
+- **Status:** done (`src/patterns.py: detect_triangles`,
+  `detect_bull_flags`). `detect_triangles()` returns every overlapping
+  sliding-window candidate as-is (by design - Stage 4 is where
+  confirmation/filtering belongs); a separate `deduplicate_triangles()`
+  collapses overlapping candidates down to one per cluster, purely for
+  readable charts. Verified visually on real AAPL data via `plot_chart()`'s
+  triangle trendline / bull flag pole+box overlays.
+- **Next:** all thresholds (r², contraction %, flat-slope %, pole
+  return %, flag range/volume/retracement %) are first-pass guesses,
+  documented in each function's docstring - they haven't been tuned
+  against real outcomes yet. They can't be validated until there's a
+  ground-truth outcome to check them against, so the concrete plan is:
+  1. Build Stage 5's labeling rule first - it defines what "the pattern
+     worked" even means.
+  2. Run `detect_triangles`/`detect_bull_flags` across a broad universe of
+     real tickers and history (not just AAPL), and label every detected
+     pattern's outcome.
+  3. Sweep each threshold and check which cutoffs best separate real
+     breakouts from fakeouts, using walk-forward splits (per Stage 6's
+     validation approach) rather than one lookback period, so the tuned
+     values aren't just overfit to a single market regime.
+  This only becomes meaningful with enough labeled examples across enough
+  tickers/time to see a real pattern in the outcomes - tuning against one
+  ticker's last couple of years would just be curve-fitting noise.
 
 ### Stage 4 — Confirmation indicators (feature engineering)
 For every detected pattern candidate, compute a feature set drawn from five

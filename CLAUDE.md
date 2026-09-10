@@ -69,3 +69,6 @@ Pattern-Detection/
 - After finishing a working piece of a stage, update `PLAN.md`'s status
   for that stage before moving on, so the plan stays an accurate record of
   where the project actually is.
+- Before every push, update `COMMANDS.md` so it accurately reflects the
+  current commands, arguments, and workflow — not just when a command is
+  first added.
