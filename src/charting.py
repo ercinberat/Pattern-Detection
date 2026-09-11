@@ -89,9 +89,14 @@ def _triangle_trendline_traces(price_data: pd.DataFrame, triangle: TrianglePatte
     ]
 
     trendline_style = dict(mode="lines", line=dict(color="#ab47bc", width=1.5), showlegend=False)
+    # PLAN.md's Stage 5b calls for the trendlines to be labeled with fit
+    # quality (r²) and how much the range has contracted, so both are
+    # shown on hover rather than just the price at that point.
+    upper_hover = f"Triangle high trendline: %{{y:.2f}}<br>Fit (r²): {triangle.high_r_squared:.2f}<br>Contraction: {triangle.contraction_pct:.0f}%<extra></extra>"
+    lower_hover = f"Triangle low trendline: %{{y:.2f}}<br>Fit (r²): {triangle.low_r_squared:.2f}<br>Contraction: {triangle.contraction_pct:.0f}%<extra></extra>"
     return [
-        go.Scatter(x=x_values, y=upper_y, hovertemplate="Triangle high trendline: %{y:.2f}<extra></extra>", **trendline_style),
-        go.Scatter(x=x_values, y=lower_y, hovertemplate="Triangle low trendline: %{y:.2f}<extra></extra>", **trendline_style),
+        go.Scatter(x=x_values, y=upper_y, hovertemplate=upper_hover, **trendline_style),
+        go.Scatter(x=x_values, y=lower_y, hovertemplate=lower_hover, **trendline_style),
     ]
 
 
@@ -104,26 +109,61 @@ def _bull_flag_line_traces(price_data: pd.DataFrame, bull_flag: BullFlagPattern)
     pole_end_price = price_data.loc[bull_flag.pole_end_date, "Close"]
 
     flag_style = dict(mode="lines", line=dict(color="#66bb6a", width=1.5), showlegend=False)
+    # PLAN.md's Stage 5b calls for the flag to be labeled with the pole's
+    # return and the flag's volume ratio, so both are shown on hover
+    # rather than just the price at that point.
+    pole_hover = f"Bull flag pole: %{{y:.2f}}<br>Pole return: {bull_flag.pole_return_pct:.1f}%<extra></extra>"
+    flag_hover_suffix = f"<br>Flag volume ratio: {bull_flag.flag_volume_ratio:.2f}<extra></extra>"
     return [
         go.Scatter(
             x=[bull_flag.pole_start_date, bull_flag.pole_end_date],
             y=[pole_start_price, pole_end_price],
-            hovertemplate="Bull flag pole: %{y:.2f}<extra></extra>",
+            hovertemplate=pole_hover,
             **flag_style,
         ),
         go.Scatter(
             x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
             y=[bull_flag.flag_high, bull_flag.flag_high],
-            hovertemplate="Flag high: %{y:.2f}<extra></extra>",
+            hovertemplate="Flag high: %{y:.2f}" + flag_hover_suffix,
             **flag_style,
         ),
         go.Scatter(
             x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
             y=[bull_flag.flag_low, bull_flag.flag_low],
-            hovertemplate="Flag low: %{y:.2f}<extra></extra>",
+            hovertemplate="Flag low: %{y:.2f}" + flag_hover_suffix,
             **flag_style,
         ),
     ]
+
+
+# Exit reason -> color, shared between the entry-to-exit line and the
+# exit marker, so a label's outcome is visually obvious at a glance:
+# green for a target hit, red for a stop-out, grey for timing out.
+_LABEL_OUTCOME_COLORS = {"target": "#26a69a", "stop": "#ef5350", "time": "#787b86"}
+
+
+def _label_traces(label: dict):
+    """
+    Build the entry-to-exit line and markers for one labeled pattern
+    outcome (src/labeling.py's label_pattern_outcome()) - a straight line
+    from the entry price/date to the exit price/date, colored by whether
+    the exit was a target hit, a stop-out, or a time-based exit.
+    """
+    outcome_color = _LABEL_OUTCOME_COLORS[label["exit_reason"]]
+    trade_line = go.Scatter(
+        x=[label["entry_date"], label["exit_date"]],
+        y=[label["entry_price"], label["exit_price"]],
+        mode="lines+markers",
+        line=dict(color=outcome_color, width=2, dash="dot"),
+        marker=dict(size=6, color=outcome_color),
+        showlegend=False,
+        hovertemplate=(
+            f"Entry: {label['entry_price']:.2f} on {label['entry_date'].date()}<br>"
+            f"Exit ({label['exit_reason']}): {label['exit_price']:.2f} on {label['exit_date'].date()}<br>"
+            f"Return: {label['return_pct']:.1f}%<extra></extra>"
+        ),
+    )
+    return [trade_line]
 
 
 def plot_chart(
@@ -133,6 +173,7 @@ def plot_chart(
     patterns=None,
     price_overlays=None,
     extra_panels=None,
+    labels=None,
     save_path: str = None,
 ):
     """
@@ -178,6 +219,10 @@ def plot_chart(
         given a color there cycles through a default palette. One panel
         is added per entry in the list, in order, below the price/volume
         panels.
+    labels: optional list of dicts (Stage 5's label_patterns() output) -
+        each drawn as a dotted line from the entry to the exit price/date,
+        colored green for a target hit, red for a stop-out, or grey for a
+        time-based exit.
     save_path: if given, saves the chart permanently to this HTML file
         path (e.g. for building up a folder of chart snapshots). If not
         given, the chart is saved to a temporary HTML file and opened
@@ -278,6 +323,11 @@ def plot_chart(
             elif isinstance(pattern, BullFlagPattern):
                 for trace in _bull_flag_line_traces(price_data, pattern):
                     fig.add_trace(trace, row=1, col=1)
+
+    if labels:
+        for label in labels:
+            for trace in _label_traces(label):
+                fig.add_trace(trace, row=1, col=1)
 
     # Volume panel: color each bar the same up/down color as its candle.
     volume_colors = [

@@ -85,6 +85,7 @@ class TrianglePattern:
     low_slope: float
     low_intercept: float
     low_r_squared: float
+    contraction_pct: float  # how much the high/low trendline gap shrank over the window
 
 
 @dataclass
@@ -103,6 +104,22 @@ class BullFlagPattern:
     pole_return_pct: float
     flag_range_pct: float
     flag_volume_ratio: float
+
+
+def pattern_evaluation_date(pattern) -> pd.Timestamp:
+    """
+    The date a detected pattern's outcome should be evaluated from: a
+    triangle's end_date, or a bull flag's flag_end_date. Both mean the
+    same thing - the last bar of the pattern candidate, where a breakout
+    would be expected to happen next. Used by both indicators.py (Stage 4)
+    and labeling.py (Stage 5) to line up their calculations with the same
+    reference point on a pattern.
+    """
+    if isinstance(pattern, TrianglePattern):
+        return pattern.end_date
+    if isinstance(pattern, BullFlagPattern):
+        return pattern.flag_end_date
+    raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
 
 
 def _fit_trendline(bar_positions, prices):
@@ -230,6 +247,7 @@ def detect_triangles(
                 low_slope=low_slope,
                 low_intercept=low_intercept,
                 low_r_squared=low_r_squared,
+                contraction_pct=contraction_pct,
             )
         )
 

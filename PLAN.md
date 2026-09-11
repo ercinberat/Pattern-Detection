@@ -144,11 +144,34 @@ Plus swing-trading-specific features:
   N bars after the breakout, without first hitting a stop-loss level?
 - Needs careful definition to avoid lookahead bias and to reflect a
   realistic swing-trade exit rule (e.g. target/stop/time-based exit).
-- **Status:** not started.
+- **Status:** done (`src/labeling.py`). `label_pattern_outcome(price_data,
+  pattern, target_pct=10.0, stop_pct=5.0, max_holding_days=20)` labels one
+  pattern using a fixed target/stop/time exit rule - the option chosen
+  from this stage's exit-rule open question below, kept simplest to
+  validate against first. Entry is the Open of the bar right after the
+  pattern's end date, so the label only ever looks at price data strictly
+  after the pattern's own detection point (avoiding lookahead bias). If
+  a bar's range covers both the stop and target, the stop is assumed hit
+  first (the conservative assumption, since daily bars don't say which
+  was actually touched first within the day). `label_patterns()` runs
+  this over a list of patterns, skipping ones too close to the end of the
+  data to label yet. Wired into `main.py --label`, which prints a
+  win-rate summary and draws each labeled trade on the chart (dotted line
+  from entry to exit, green/red/grey for target/stop/time).
+- ATR-based and trailing-stop exit rules were discussed and deliberately
+  left for later (see Open Questions) rather than building all three now.
 
 ### Stage 5b — Visualization
 - TradingView-style dark theme, multi-panel chart: candlesticks + volume +
   RSI + MACD stacked below price, shared x-axis.
+  - **Deviation from this description:** RSI and MACD are not always-on
+    default panels. Once Stage 4 grew into five different indicator
+    combinations (not just RSI/MACD), every indicator's panel(s) became
+    opt-in via `main.py --indicator N` instead - a plain run with no
+    `--indicator` shows neither. This is a deliberate call, not an
+    oversight: keeping the default chart uncluttered mattered more than
+    matching the original always-on RSI/MACD wording once there were five
+    combinations to choose from instead of two.
 - Every detected pattern is drawn directly on the price panel: triangle
   trendlines (with r² and contraction ratio labeled), bull flag pole/flag
   zones (with pole return and volume ratio labeled), swing high/low pivot
@@ -163,11 +186,18 @@ Plus swing-trading-specific features:
 - Being built incrementally alongside each stage (rather than only at the
   end) so every stage's output can be visually sanity-checked as it's
   built, per an explicit decision to deviate from strict pipeline order.
-- **Status:** in progress (`src/charting.py: plot_chart`). Renders the
-  candlestick + volume chart with Stage 2's pivot markers, Stage 3's
-  triangle/bull-flag overlays, and Stage 4's Bollinger Band overlay /
-  ADX-DMI+MACD extra panels, all working. Combinations #3-5's chart
-  wiring will follow as each is built.
+- **Status:** done (`src/charting.py: plot_chart`). Renders the
+  candlestick + volume chart with Stage 2's pivot markers; Stage 3's
+  triangle/bull-flag overlays, now labeled on hover with r²/contraction %
+  (triangles) and pole return/volume ratio (bull flags), per this
+  stage's original description; all five of Stage 4's indicator
+  combinations, each wired to either `price_overlays` (Bollinger Bands,
+  Donchian Channel, 52-week high - series sharing the price panel's own
+  scale) or `extra_panels` (ADX/DMI, MACD, OBV, RSI, ATR, Relative
+  Strength - series needing their own stacked panel); and Stage 5's
+  labeled trade outcomes (`labels` parameter - a dotted entry-to-exit
+  line per pattern, colored green/red/grey for target/stop/time). A
+  dashed vertical crosshair spans every panel on hover.
 - **Charting library: Plotly, not matplotlib/mplfinance.** The chart
   originally used mplfinance, but its interactive window didn't reliably
   render scatter overlays (pivot/pattern markers) on this machine —
@@ -267,6 +297,10 @@ Pattern-Detection/
 - Universe: single names, an index constituent list, or ETFs? Affects
   earnings-date handling and relative-strength baseline.
 - Exit rule for labeling: fixed target/stop, ATR-based, or trailing?
+  Fixed target/stop is what's built (see Stage 5) as the simplest
+  starting point; ATR-based and trailing stops remain options to add as
+  alternative exit rules once there's a labeled baseline to compare them
+  against.
 - Position sizing / risk management: out of scope for the detector itself,
   but needed before this becomes a tradeable strategy.
 - How much of the ML step is worth it vs. a simpler rule-based scoring
