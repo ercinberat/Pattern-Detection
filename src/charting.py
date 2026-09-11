@@ -1,108 +1,129 @@
 """
-TradingView-style dark-themed candlestick + volume chart for daily OHLCV
-price data.
+Interactive TradingView-style dark-themed candlestick + volume chart for
+daily OHLCV price data, built with Plotly.
 
 This is the single plotting entry point described in PLAN.md (Stage 5b):
 as later stages (pivots, pattern detection, confirmation indicators) produce
-output, they'll be passed into plot_chart() as extra overlays/panels, so
-the chart looks the same everywhere it's used instead of every script
-building its own plot.
+output, they're passed into plot_chart() as extra overlays/panels, so the
+chart looks the same everywhere it's used instead of every script building
+its own plot.
+
+Renders to a self-contained HTML file and opens it in the default browser,
+rather than a static image. This gives native hover tooltips (candle OHLC,
+pivot/pattern values, indicator readings) and pan/zoom for free, and was
+chosen over the project's original matplotlib/mplfinance charting because
+matplotlib's interactive window didn't reliably render scatter overlays on
+this machine - see PLAN.md's Stage 5b notes for the full reasoning behind
+the switch.
 """
 
 import os
 import tempfile
 
-import mplfinance as mpf
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from src.patterns import BullFlagPattern, TrianglePattern
 
+# Colors matching the project's original TradingView-inspired dark theme.
+_BACKGROUND_COLOR = "#131722"
+_GRID_COLOR = "#2a2e39"
+_TEXT_COLOR = "#d1d4dc"
+_UP_COLOR = "#26a69a"
+_DOWN_COLOR = "#ef5350"
 
-# A dark color scheme close to TradingView's default look: dark background,
-# teal/red candles for up/down days, and a subtle dashed grid.
-_TRADINGVIEW_STYLE = mpf.make_mpf_style(
-    base_mpf_style="nightclouds",
-    marketcolors=mpf.make_marketcolors(
-        up="#26a69a",
-        down="#ef5350",
-        edge="inherit",
-        wick="inherit",
-        volume="inherit",
-    ),
-    facecolor="#131722",
-    figcolor="#131722",
-    gridcolor="#2a2e39",
-    gridstyle="--",
-    rc={
-        "axes.labelcolor": "#d1d4dc",
-        "xtick.color": "#d1d4dc",
-        "ytick.color": "#d1d4dc",
-        "text.color": "#d1d4dc",
-    },
-)
+# Fallback colors for extra_panels lines that don't specify their own
+# color, cycled through in the order the lines are given.
+_DEFAULT_PANEL_LINE_COLORS = ["#42a5f5", "#ffa726", "#ab47bc", "#66bb6a", "#ef5350"]
+
+# A dashed vertical crosshair line at the hovered date, spanning every
+# panel at once. Plotly's built-in per-axis spike lines
+# (showspikes/spikemode="across") only extend across the one subplot
+# they're set on, not through independently-numbered subplot axes like
+# the ones make_subplots creates here - so instead, this draws the line
+# by hand: on every hover, it adds a shape anchored to the shared x-axis
+# ("xref": "x") but spanning the full figure height ("yref": "paper",
+# 0 to 1), which correctly reaches through every stacked panel; on
+# unhover, the shape is removed.
+_CROSSHAIR_SCRIPT = f"""
+var plotDiv = document.getElementsByClassName('plotly-graph-div')[0];
+plotDiv.on('plotly_hover', function(eventData) {{
+    var hoveredX = eventData.points[0].x;
+    Plotly.relayout(plotDiv, {{
+        shapes: [{{
+            type: 'line',
+            xref: 'x',
+            yref: 'paper',
+            x0: hoveredX,
+            x1: hoveredX,
+            y0: 0,
+            y1: 1,
+            line: {{ color: '{_TEXT_COLOR}', width: 1, dash: 'dash' }}
+        }}]
+    }});
+}});
+plotDiv.on('plotly_unhover', function() {{
+    Plotly.relayout(plotDiv, {{ shapes: [] }});
+}});
+"""
 
 
-def _triangle_trendlines(price_data: pd.DataFrame, triangle: TrianglePattern):
+def _triangle_trendline_traces(price_data: pd.DataFrame, triangle: TrianglePattern):
     """
-    Build the upper and lower trendline segments for one detected
-    triangle, evaluating its fitted line equations at the bar positions
-    of its start and end dates.
+    Build the upper and lower trendline traces for one detected triangle,
+    evaluating its fitted line equations at the bar positions of its
+    start and end dates.
     """
     start_position = price_data.index.get_loc(triangle.start_date)
     end_position = price_data.index.get_loc(triangle.end_date)
+    x_values = [triangle.start_date, triangle.end_date]
 
-    upper_line = [
-        (triangle.start_date, triangle.high_slope * start_position + triangle.high_intercept),
-        (triangle.end_date, triangle.high_slope * end_position + triangle.high_intercept),
+    upper_y = [
+        triangle.high_slope * start_position + triangle.high_intercept,
+        triangle.high_slope * end_position + triangle.high_intercept,
     ]
-    lower_line = [
-        (triangle.start_date, triangle.low_slope * start_position + triangle.low_intercept),
-        (triangle.end_date, triangle.low_slope * end_position + triangle.low_intercept),
+    lower_y = [
+        triangle.low_slope * start_position + triangle.low_intercept,
+        triangle.low_slope * end_position + triangle.low_intercept,
     ]
-    return [upper_line, lower_line]
+
+    trendline_style = dict(mode="lines", line=dict(color="#ab47bc", width=1.5), showlegend=False)
+    return [
+        go.Scatter(x=x_values, y=upper_y, hovertemplate="Triangle high trendline: %{y:.2f}<extra></extra>", **trendline_style),
+        go.Scatter(x=x_values, y=lower_y, hovertemplate="Triangle low trendline: %{y:.2f}<extra></extra>", **trendline_style),
+    ]
 
 
-def _month_start_ticks(price_data: pd.DataFrame):
+def _bull_flag_line_traces(price_data: pd.DataFrame, bull_flag: BullFlagPattern):
     """
-    Find the bar position (0, 1, 2, ...) of the first trading day of every
-    calendar month in price_data, along with a "Year Mon" label for each -
-    used to give the x-axis one tick per month instead of mplfinance's
-    default, sparser auto-spacing.
-    """
-    # to_period() doesn't accept a timezone-aware index (yfinance returns
-    # one), so drop the timezone first - it doesn't affect which calendar
-    # month/day each bar falls on.
-    naive_dates = price_data.index.tz_localize(None)
-    year_month = pd.Series(naive_dates.to_period("M"), index=price_data.index)
-    is_month_start = year_month != year_month.shift(1)
-
-    tick_positions = [position for position, is_start in enumerate(is_month_start) if is_start]
-    tick_labels = [price_data.index[position].strftime("%Y %b") for position in tick_positions]
-    return tick_positions, tick_labels
-
-
-def _bull_flag_lines(price_data: pd.DataFrame, bull_flag: BullFlagPattern):
-    """
-    Build the pole line (from the pole's start close to its end close)
-    and the flag-range box outline (top and bottom of the consolidation)
-    for one detected bull flag.
+    Build the pole line and flag-range box outline traces for one
+    detected bull flag.
     """
     pole_start_price = price_data.loc[bull_flag.pole_start_date, "Close"]
     pole_end_price = price_data.loc[bull_flag.pole_end_date, "Close"]
 
-    pole_line = [
-        (bull_flag.pole_start_date, pole_start_price),
-        (bull_flag.pole_end_date, pole_end_price),
+    flag_style = dict(mode="lines", line=dict(color="#66bb6a", width=1.5), showlegend=False)
+    return [
+        go.Scatter(
+            x=[bull_flag.pole_start_date, bull_flag.pole_end_date],
+            y=[pole_start_price, pole_end_price],
+            hovertemplate="Bull flag pole: %{y:.2f}<extra></extra>",
+            **flag_style,
+        ),
+        go.Scatter(
+            x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
+            y=[bull_flag.flag_high, bull_flag.flag_high],
+            hovertemplate="Flag high: %{y:.2f}<extra></extra>",
+            **flag_style,
+        ),
+        go.Scatter(
+            x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
+            y=[bull_flag.flag_low, bull_flag.flag_low],
+            hovertemplate="Flag low: %{y:.2f}<extra></extra>",
+            **flag_style,
+        ),
     ]
-    flag_top = [
-        (bull_flag.flag_start_date, bull_flag.flag_high),
-        (bull_flag.flag_end_date, bull_flag.flag_high),
-    ]
-    flag_bottom = [
-        (bull_flag.flag_start_date, bull_flag.flag_low),
-        (bull_flag.flag_end_date, bull_flag.flag_low),
-    ]
-    return [pole_line, flag_top, flag_bottom]
 
 
 def plot_chart(
@@ -110,12 +131,14 @@ def plot_chart(
     ticker: str = "",
     pivots: pd.DataFrame = None,
     patterns=None,
-    bollinger_bands: pd.DataFrame = None,
+    price_overlays=None,
     extra_panels=None,
     save_path: str = None,
 ):
     """
-    Plot a candlestick + volume chart for one stock's daily price history.
+    Plot an interactive candlestick + volume chart for one stock's daily
+    price history. Hovering over any candle, marker, or indicator line
+    shows its value; scroll/drag to zoom and pan.
 
     price_data: DataFrame indexed by date with Open/High/Low/Close/Volume
         columns, e.g. the output of fetch_daily_price_history().
@@ -128,127 +151,228 @@ def plot_chart(
         detect_triangles()/detect_bull_flags() output). Triangle trendlines
         are drawn as two converging lines; bull flags are drawn as a pole
         line plus a box around the flag consolidation.
-    bollinger_bands: optional output of indicators.py's
-        compute_bollinger_bands() (Stage 4) - a DataFrame with the same
-        index as price_data plus upper_band/lower_band columns. When
-        given, the bands are drawn directly on the price panel, so a
-        squeeze (bands pinching together) can be seen alongside any
-        triangle contracting at the same time.
-    extra_panels: reserved for the rest of Stage 4's confirmation
-        indicators. Once more of indicators.py exists, this will hold
-        series (RSI, MACD, ADX, etc.) to stack as extra panels below the
-        price panel. Ignored for now.
-    save_path: if given, saves the chart image permanently to this file
-        path (e.g. for building up a folder of chart images). If not
-        given, the chart is saved to a temporary image and opened
-        automatically in the default image viewer instead - matplotlib's
-        own interactive window doesn't reliably render scatter overlays
-        (pivot/pattern markers) on every system, but this save-then-open
-        approach has been confirmed to render everything correctly.
+    price_overlays: optional list of line specs for indicators that share
+        the price panel's own y-scale (e.g. Bollinger Bands, a Donchian
+        Channel) rather than needing a separate panel. Each spec is a
+        dict:
+            {
+                "lines": {"Upper Band": series, "Lower Band": series},
+                "colors": {"Upper Band": "#787b86", ...},   # optional
+            }
+        "lines" values are Series with the same index as price_data.
+        "colors" is optional per-name overrides; anything not given a
+        color there cycles through a default palette. All specs are drawn
+        on the same price panel as the candles.
+    extra_panels: optional list of panel specs for indicators that need
+        their own stacked panel below price/volume, rather than an
+        overlay on the price panel (e.g. ADX/DMI, MACD - oscillators with
+        their own y-scale unrelated to price). Each spec is a dict:
+            {
+                "ylabel": "MACD",
+                "lines": {"MACD": series, "Signal": series},   # optional
+                "bars": {"Histogram": series},                  # optional
+                "colors": {"MACD": "#42a5f5", ...},             # optional
+            }
+        "lines"/"bars" values are Series with the same index as
+        price_data. "colors" is optional per-name overrides; anything not
+        given a color there cycles through a default palette. One panel
+        is added per entry in the list, in order, below the price/volume
+        panels.
+    save_path: if given, saves the chart permanently to this HTML file
+        path (e.g. for building up a folder of chart snapshots). If not
+        given, the chart is saved to a temporary HTML file and opened
+        automatically in the default browser instead.
     """
     chart_title = f"{ticker} - Daily" if ticker else "Daily Price"
 
-    plot_kwargs = dict(
-        type="candle",
-        style=_TRADINGVIEW_STYLE,
-        volume=True,
-        title=chart_title,
-        ylabel="Price ($)",
-        ylabel_lower="Volume",
-        # Wider than a plain 12x7 figure, since showing one label per
-        # calendar month (see _month_start_ticks below) means a couple of
-        # dozen labels need to fit rather than mplfinance's usual handful.
-        figsize=(18, 7),
-        returnfig=True,
+    num_extra_panels = len(extra_panels) if extra_panels else 0
+    total_rows = 2 + num_extra_panels
+
+    # The main price panel gets 3x the height of every other panel
+    # (volume, and any extra indicator panels), matching the project's
+    # original panel proportions.
+    row_heights = [3] + [1] * (total_rows - 1)
+    row_height_sum = sum(row_heights)
+    row_heights = [height / row_height_sum for height in row_heights]
+
+    fig = make_subplots(rows=total_rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights)
+
+    fig.add_trace(
+        go.Candlestick(
+            x=price_data.index,
+            open=price_data["Open"],
+            high=price_data["High"],
+            low=price_data["Low"],
+            close=price_data["Close"],
+            increasing_line_color=_UP_COLOR,
+            decreasing_line_color=_DOWN_COLOR,
+            increasing_fillcolor=_UP_COLOR,
+            decreasing_fillcolor=_DOWN_COLOR,
+            name="Price",
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
     )
 
-    # Built up across the pivots/bollinger_bands sections below, since
-    # both draw onto the price panel using mplfinance's scatter/line
-    # overlay mechanism ("addplot") and need to share the same list.
-    overlay_plots = []
-
     if pivots is not None:
-        # Draw swing highs as downward triangles and swing lows as upward
-        # triangles, right at the pivot bar's High/Low price, using
-        # mplfinance's scatter overlay ("addplot"). Each series lines up
-        # with price_data bar-for-bar, with NaN on every non-pivot bar, so
-        # only the actual pivot bars get a marker drawn.
-        overlay_plots.extend(
-            [
-                mpf.make_addplot(
-                    pivots["swing_high"],
-                    type="scatter",
-                    marker="v",
-                    markersize=200,
-                    color="#ffa726",
-                    edgecolors="black",
-                ),
-                mpf.make_addplot(
-                    pivots["swing_low"],
-                    type="scatter",
-                    marker="^",
-                    markersize=200,
-                    color="#42a5f5",
-                    edgecolors="black",
-                ),
-            ]
+        # NaN values (every non-pivot bar) are automatically skipped by
+        # Plotly, so only the actual pivot bars get a marker drawn.
+        fig.add_trace(
+            go.Scatter(
+                x=pivots.index,
+                y=pivots["swing_high"],
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=12, color="#ffa726", line=dict(color="black", width=1)),
+                name="Swing High",
+                showlegend=False,
+                hovertemplate="Swing High: %{y:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=pivots.index,
+                y=pivots["swing_low"],
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=12, color="#42a5f5", line=dict(color="black", width=1)),
+                name="Swing Low",
+                showlegend=False,
+                hovertemplate="Swing Low: %{y:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
         )
 
-    if bollinger_bands is not None:
-        # Thin grey lines so the bands read as context rather than
-        # competing visually with the candles/pivot markers/pattern lines.
-        overlay_plots.extend(
-            [
-                mpf.make_addplot(bollinger_bands["upper_band"], color="#787b86", width=0.8),
-                mpf.make_addplot(bollinger_bands["lower_band"], color="#787b86", width=0.8),
-            ]
-        )
-
-    if overlay_plots:
-        plot_kwargs["addplot"] = overlay_plots
+    for overlay_spec in price_overlays or []:
+        overlay_colors = overlay_spec.get("colors", {})
+        next_default_color = 0
+        for name, series in overlay_spec.get("lines", {}).items():
+            color = overlay_colors.get(name)
+            if color is None:
+                color = _DEFAULT_PANEL_LINE_COLORS[next_default_color % len(_DEFAULT_PANEL_LINE_COLORS)]
+                next_default_color += 1
+            fig.add_trace(
+                go.Scatter(
+                    x=series.index,
+                    y=series,
+                    mode="lines",
+                    line=dict(color=color, width=1),
+                    name=name,
+                    showlegend=False,
+                    hovertemplate=f"{name}: " + "%{y:.2f}<extra></extra>",
+                ),
+                row=1,
+                col=1,
+            )
 
     if patterns:
         # Triangle trendlines are drawn in purple, bull flag pole/box
         # lines in green, so the two pattern types stay visually distinct
         # from each other and from the orange/blue pivot markers above.
-        line_segments = []
-        line_colors = []
         for pattern in patterns:
             if isinstance(pattern, TrianglePattern):
-                segments = _triangle_trendlines(price_data, pattern)
-                line_segments.extend(segments)
-                line_colors.extend(["#ab47bc"] * len(segments))
+                for trace in _triangle_trendline_traces(price_data, pattern):
+                    fig.add_trace(trace, row=1, col=1)
             elif isinstance(pattern, BullFlagPattern):
-                segments = _bull_flag_lines(price_data, pattern)
-                line_segments.extend(segments)
-                line_colors.extend(["#66bb6a"] * len(segments))
+                for trace in _bull_flag_line_traces(price_data, pattern):
+                    fig.add_trace(trace, row=1, col=1)
 
-        if line_segments:
-            plot_kwargs["alines"] = dict(alines=line_segments, colors=line_colors, linewidths=[1.5] * len(line_segments))
+    # Volume panel: color each bar the same up/down color as its candle.
+    volume_colors = [
+        _UP_COLOR if close_price >= open_price else _DOWN_COLOR
+        for open_price, close_price in zip(price_data["Open"], price_data["Close"])
+    ]
+    fig.add_trace(
+        go.Bar(x=price_data.index, y=price_data["Volume"], marker_color=volume_colors, name="Volume", showlegend=False),
+        row=2,
+        col=1,
+    )
 
-    fig, axes = mpf.plot(price_data, **plot_kwargs)
+    # Extra indicator panels: each spec's lines/bars get their own row,
+    # stacked below price/volume in the order given.
+    for panel_offset, panel_spec in enumerate(extra_panels or []):
+        panel_row = 3 + panel_offset
+        panel_colors = panel_spec.get("colors", {})
+        next_default_color = 0
 
-    # mplfinance's default x-axis uses bar position (0, 1, 2, ...), not
-    # real dates, and auto-picks a handful of tick positions itself. To
-    # get one label per calendar month instead, override the ticks on
-    # every returned axis with our own month-start positions - only the
-    # bottom-most (visible) panel's labels actually get shown, but setting
-    # it on all of them is simple and safe either way.
-    tick_positions, tick_labels = _month_start_ticks(price_data)
-    for axis in axes:
-        axis.set_xticks(tick_positions)
-        axis.set_xticklabels(tick_labels, rotation=45, ha="right")
+        for name, series in panel_spec.get("lines", {}).items():
+            color = panel_colors.get(name)
+            if color is None:
+                color = _DEFAULT_PANEL_LINE_COLORS[next_default_color % len(_DEFAULT_PANEL_LINE_COLORS)]
+                next_default_color += 1
+            fig.add_trace(
+                go.Scatter(
+                    x=series.index,
+                    y=series,
+                    mode="lines",
+                    line=dict(color=color, width=1.2),
+                    name=name,
+                    showlegend=False,
+                    hovertemplate=f"{name}: " + "%{y:.2f}<extra></extra>",
+                ),
+                row=panel_row,
+                col=1,
+            )
+
+        for name, series in panel_spec.get("bars", {}).items():
+            color = panel_colors.get(name, "#787b86")
+            fig.add_trace(
+                go.Bar(x=series.index, y=series, marker_color=color, opacity=0.6, name=name, showlegend=False),
+                row=panel_row,
+                col=1,
+            )
+
+        fig.update_yaxes(title_text=panel_spec.get("ylabel", ""), row=panel_row, col=1)
+
+    fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+
+    # Candlestick traces add their own range slider below the chart by
+    # default; it's redundant with normal scroll/drag zooming, so switch
+    # it off.
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+
+    # Skip weekends so trading days stay packed together with no empty
+    # gaps (matching the project's original TradingView-style look), and
+    # show one x-axis label per calendar month.
+    fig.update_xaxes(
+        rangebreaks=[dict(bounds=["sat", "mon"])],
+        dtick="M1",
+        tickformat="%Y %b",
+        tickangle=45,
+        gridcolor=_GRID_COLOR,
+    )
+    fig.update_yaxes(gridcolor=_GRID_COLOR)
+
+    fig.update_layout(
+        title=chart_title,
+        template="plotly_dark",
+        paper_bgcolor=_BACKGROUND_COLOR,
+        plot_bgcolor=_BACKGROUND_COLOR,
+        font=dict(color=_TEXT_COLOR),
+        # "x unified" shows every panel's value at the hovered date
+        # together in one tooltip - e.g. price, volume, and ADX/MACD all
+        # at once - closer to TradingView's crosshair info panel than
+        # Plotly's default one-trace-at-a-time hover.
+        hovermode="x unified",
+        height=250 * total_rows + 150,
+        margin=dict(t=60, b=80),
+    )
 
     if save_path:
-        fig.savefig(save_path, bbox_inches="tight")
+        fig.write_html(save_path, include_plotlyjs=True, post_script=_CROSSHAIR_SCRIPT)
     else:
-        # No permanent save path given: render to a temporary PNG and open
-        # it in the default image viewer, so the chart still "pops up"
-        # without relying on matplotlib's interactive window.
-        temp_image = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        temp_image.close()
-        fig.savefig(temp_image.name, bbox_inches="tight")
-        os.startfile(temp_image.name)
+        # No permanent save path given: render to a temporary HTML file
+        # and open it in the default browser. include_plotlyjs=True embeds
+        # the whole Plotly.js library in the file instead of loading it
+        # from a CDN, so the chart still renders correctly without an
+        # internet connection.
+        temp_file = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
+        temp_file.close()
+        fig.write_html(temp_file.name, include_plotlyjs=True, post_script=_CROSSHAIR_SCRIPT)
+        os.startfile(temp_file.name)
 
 
 if __name__ == "__main__":

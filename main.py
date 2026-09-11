@@ -6,16 +6,26 @@ confirmation indicator features for each one (Stage 4), and plot the
 result (Stage 5b) - so the pieces built so far can be exercised end-to-end
 without importing each module by hand.
 
-As the rest of Stage 4 and later stages (labeling, modeling, backtesting)
-are built, this script is where they get wired into the same end-to-end
-run.
+As later stages (labeling, modeling, backtesting) are built, this script
+is where they get wired into the same end-to-end run.
 """
 
 import argparse
+import functools
 
 from scripts.fetch_real_data import fetch_daily_price_history
 from src.charting import plot_chart
-from src.indicators import INDICATOR_COMBINATIONS, compute_bollinger_bands
+from src.indicators import (
+    INDICATOR_COMBINATIONS,
+    compute_adx_dmi,
+    compute_atr,
+    compute_bollinger_bands,
+    compute_donchian_channel,
+    compute_macd,
+    compute_obv,
+    compute_relative_strength,
+    compute_rsi,
+)
 from src.patterns import (
     BullFlagPattern,
     TrianglePattern,
@@ -25,8 +35,18 @@ from src.patterns import (
     find_pivots,
 )
 
+# Combination #5 needs a second ticker's data to compare against; SPY (an
+# S&P 500 ETF) is used as a general-market benchmark by default.
+_DEFAULT_BENCHMARK_TICKER = "SPY"
 
-def run(ticker: str, pivot_order: int = 5, period: str = "2y", indicator_number: int = None) -> None:
+
+def run(
+    ticker: str,
+    pivot_order: int = 5,
+    period: str = "2y",
+    indicator_number: int = None,
+    save_path: str = None,
+) -> None:
     """
     Fetch a ticker's daily price history, find its swing pivots, and
     detect triangle/bull-flag candidates. If indicator_number is given,
@@ -38,6 +58,9 @@ def run(ticker: str, pivot_order: int = 5, period: str = "2y", indicator_number:
         run, numbered to match PLAN.md's Stage 4 table (e.g. 1 = Bollinger
         Band squeeze + volume surge). If None (the default), Stage 4 is
         skipped entirely - only Stages 1-3 and the chart run.
+    save_path: passed straight through to plot_chart() - if given, saves
+        the chart to this file instead of opening a browser tab. Useful
+        for scripted/repeated runs, e.g. scripts/end_to_end_test.py.
     """
     price_data = fetch_daily_price_history(ticker, period=period)
     pivots = find_pivots(price_data, order=pivot_order)
@@ -49,35 +72,106 @@ def run(ticker: str, pivot_order: int = 5, period: str = "2y", indicator_number:
     bull_flags = detect_bull_flags(price_data)
     patterns = triangles + bull_flags
 
-    bollinger_bands = None
+    price_overlays = None
+    extra_panels = None
 
     if indicator_number is not None:
+        combination = INDICATOR_COMBINATIONS[indicator_number]
+
+        # Combination #5 additionally needs a benchmark ticker's data -
+        # fetch it and bind it in, so it can be called the same
+        # (price_data, pattern) way as every other combination below.
+        compute_features = combination["compute_features"]
+        if combination.get("needs_benchmark"):
+            benchmark_data = fetch_daily_price_history(_DEFAULT_BENCHMARK_TICKER, period=period)
+            compute_features = functools.partial(compute_features, benchmark_data=benchmark_data)
+
         # Stage 4: for every detected pattern, compute the chosen
         # indicator combination's features - printed to the console since
         # these are per-pattern confirmation scores, not a chart shape of
         # their own.
-        combination = INDICATOR_COMBINATIONS[indicator_number]
         print(f"Indicator #{indicator_number}: {combination['name']}")
         for pattern in patterns:
-            features = combination["compute_features"](price_data, pattern)
+            features = compute_features(price_data, pattern)
             if isinstance(pattern, TrianglePattern):
                 print(f"  {pattern.triangle_type} triangle ending {pattern.end_date.date()}: {features}")
             elif isinstance(pattern, BullFlagPattern):
                 print(f"  bull flag ending {pattern.flag_end_date.date()}: {features}")
 
-        # Combination #1's Bollinger Bands are drawn directly on the chart
-        # so the squeeze can be seen alongside the pattern shapes.
-        # Combinations #2-5 will need their own chart wiring added here
-        # once they exist.
+        # Each combination's chart wiring differs by what kind of series
+        # it produces: combinations #1, #3, and #5's price-scale series
+        # (Bollinger Bands, Donchian Channel, 52-week high) go in
+        # price_overlays; combination #2's ADX/DMI and MACD, #3's OBV,
+        # #4's RSI and ATR, and #5's relative strength are on their own
+        # unrelated scales and need a separate stacked panel each.
         if indicator_number == 1:
             bollinger_bands = compute_bollinger_bands(price_data)
+            price_overlays = [
+                {
+                    "lines": {"Upper Band": bollinger_bands["upper_band"], "Lower Band": bollinger_bands["lower_band"]},
+                    "colors": {"Upper Band": "#787b86", "Lower Band": "#787b86"},
+                },
+            ]
+        elif indicator_number == 2:
+            adx_dmi = compute_adx_dmi(price_data)
+            macd = compute_macd(price_data)
+            extra_panels = [
+                {
+                    "ylabel": "ADX / DMI",
+                    "lines": {"ADX": adx_dmi["adx"], "+DI": adx_dmi["plus_di"], "-DI": adx_dmi["minus_di"]},
+                    "colors": {"ADX": "#d1d4dc", "+DI": "#26a69a", "-DI": "#ef5350"},
+                },
+                {
+                    "ylabel": "MACD",
+                    "lines": {"MACD": macd["macd_line"], "Signal": macd["signal_line"]},
+                    "bars": {"Histogram": macd["histogram"]},
+                    "colors": {"MACD": "#42a5f5", "Signal": "#ffa726", "Histogram": "#787b86"},
+                },
+            ]
+        elif indicator_number == 3:
+            donchian = compute_donchian_channel(price_data)
+            obv = compute_obv(price_data)
+            price_overlays = [
+                {
+                    "lines": {"Donchian Upper": donchian["upper_channel"], "Donchian Lower": donchian["lower_channel"]},
+                    "colors": {"Donchian Upper": "#26a69a", "Donchian Lower": "#ef5350"},
+                },
+            ]
+            extra_panels = [
+                {"ylabel": "OBV", "lines": {"OBV": obv}, "colors": {"OBV": "#42a5f5"}},
+            ]
+        elif indicator_number == 4:
+            rsi = compute_rsi(price_data)
+            atr = compute_atr(price_data)
+            extra_panels = [
+                {"ylabel": "RSI", "lines": {"RSI": rsi}, "colors": {"RSI": "#42a5f5"}},
+                {"ylabel": "ATR", "lines": {"ATR": atr}, "colors": {"ATR": "#ffa726"}},
+            ]
+        elif indicator_number == 5:
+            # The rolling 52-week high is computed directly here (rather
+            # than via a dedicated indicators.py function) since it's a
+            # one-line rolling max - compute_pct_from_52_week_high()
+            # already does this internally, but returns the % distance
+            # from it rather than the price level a chart overlay needs.
+            # benchmark_data was already fetched above (needed for
+            # compute_features too), reused here rather than fetched again.
+            rolling_52_week_high = price_data["Close"].rolling(window=252, min_periods=1).max()
+            relative_strength = compute_relative_strength(price_data, benchmark_data)
+            price_overlays = [
+                {"lines": {"52-Week High": rolling_52_week_high}, "colors": {"52-Week High": "#787b86"}},
+            ]
+            extra_panels = [
+                {"ylabel": "Relative Strength", "lines": {"Relative Strength": relative_strength}, "colors": {"Relative Strength": "#ab47bc"}},
+            ]
 
     plot_chart(
         price_data,
         ticker=ticker,
         pivots=pivots,
         patterns=patterns,
-        bollinger_bands=bollinger_bands,
+        price_overlays=price_overlays,
+        extra_panels=extra_panels,
+        save_path=save_path,
     )
 
 

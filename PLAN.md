@@ -84,14 +84,60 @@ Plus swing-trading-specific features:
 - Gap-through-pattern flag (gap vs. gradual breakout)
 - Earnings-date proximity (if trading single names)
 
-- **Status:** in progress (`src/indicators.py`). Combination #1
-  (Bollinger Band squeeze + volume surge) is built:
-  `compute_bollinger_bands()` returns the full band series for charting,
-  and `bollinger_squeeze_and_volume_surge(price_data, pattern)` evaluates
-  the squeeze/surge at a given pattern's end date and returns a feature
-  dict. Wired into `main.py` - prints each detected pattern's features and
-  draws the bands on the chart. Combinations #2-5 and the
-  swing-trading-specific features are not built yet.
+- **Status:** all five indicator combinations built (`src/indicators.py`);
+  swing-trading-specific features (N-day close-through confirmation,
+  gap-through-pattern flag, earnings-date proximity) not started.
+  - Combination #1 (Bollinger Band squeeze + volume surge) is built:
+    `compute_bollinger_bands()` returns the full band series for
+    charting, and `bollinger_squeeze_and_volume_surge(price_data,
+    pattern)` evaluates the squeeze/surge at a given pattern's end date
+    and returns a feature dict. Drawn on the chart as an overlay on the
+    price panel.
+  - Combination #2 (ADX/DMI trend filter + MACD histogram flip) is
+    built: `compute_adx_dmi()` (Wilder-smoothed ADX/+DI/-DI) and
+    `compute_macd()` (MACD line/signal/histogram), combined in
+    `adx_trend_filter_and_macd_flip(price_data, pattern)`. Drawn as two
+    stacked panels below price/volume via `charting.py`'s new
+    `extra_panels` mechanism (a list of `{ylabel, lines, bars, colors}`
+    panel specs), rather than an overlay - ADX/MACD are oscillators with
+    their own y-scale, unlike Bollinger Bands.
+  - Combination #3 (Donchian Channel breakout + OBV confirming new high)
+    is built: `compute_donchian_channel()` (rolling high/low over the
+    prior window, excluding today - needed so a breakout is actually
+    possible) and `compute_obv()`, combined in
+    `donchian_breakout_and_obv_confirmation(price_data, pattern)`. The
+    channel shares the price panel's scale (drawn via the new
+    `price_overlays` mechanism, generalized from combination #1's
+    Bollinger-Band-only overlay so future price-scale indicators don't
+    each need their own bespoke `plot_chart()` parameter); OBV gets its
+    own `extra_panels` panel since it's on a cumulative-volume scale
+    unrelated to price.
+  - Combination #4 (RSI momentum shift + ATR expansion off a low) is
+    built: `compute_rsi()` and `compute_atr()` (both Wilder-smoothed),
+    combined in `rsi_momentum_shift_and_atr_expansion(price_data,
+    pattern)`. Both are oscillator/volatility series unrelated to price
+    scale, so both get their own `extra_panels` panel.
+  - Combination #5 (proximity to 52-week high + relative strength vs. a
+    benchmark) is built: `compute_pct_from_52_week_high()` and
+    `compute_relative_strength()`, combined in
+    `near_52_week_high_and_relative_strength(price_data, pattern,
+    benchmark_data)`. This is the one combination that needs a second
+    ticker's data (a benchmark index/sector ETF, SPY by default in
+    `main.py`) - it doesn't fit the plain `(price_data, pattern)` shape
+    the other four share, so `INDICATOR_COMBINATIONS[5]` is flagged
+    `needs_benchmark: True` and callers bind `benchmark_data` in with
+    `functools.partial` before calling it uniformly with the rest. The
+    52-week high is drawn as a `price_overlays` line; relative strength
+    gets its own `extra_panels` panel.
+  - All five combinations are registered in `INDICATOR_COMBINATIONS` and
+    selected via `main.py --indicator N`. The swing-trading-specific
+    features (N-day close-through confirmation, gap-through-pattern flag,
+    earnings-date proximity) are not built yet.
+  - `scripts/end_to_end_test.py` is a smoke test that runs the real
+    pipeline through every stage and every indicator combination against
+    live data, printing PASS/FAIL per check - not a formal pytest suite
+    (see `COMMANDS.md`), but a fast way to catch a broken combination
+    after a change without manually re-checking each one by hand.
 
 ### Stage 5 — Labeling
 - For each detected pattern, label the outcome: did price move > X% within
@@ -110,24 +156,44 @@ Plus swing-trading-specific features:
 - Built as a single `plot_chart()` entry point taking the DataFrame plus
   detected patterns, so output stays visually consistent everywhere it's
   used.
-- `patterns` and `extra_panels` arguments are placeholders wired in for
-  Stage 3 and Stage 4 respectively — once triangle/flag detection and
-  `indicators.py` exist, their output can be passed straight in without
-  changing the charting code.
+- `patterns` and `extra_panels` arguments take Stage 3's triangle/flag
+  detection output and Stage 4's indicator series respectively, without
+  the charting code needing to change as new pattern types or
+  indicators are added.
 - Being built incrementally alongside each stage (rather than only at the
   end) so every stage's output can be visually sanity-checked as it's
   built, per an explicit decision to deviate from strict pipeline order.
-- **Status:** in progress (`src/charting.py: plot_chart`). Currently renders
-  the candlestick + volume chart with Stage 2's pivot markers overlaid.
-  Triangle/flag overlays (Stage 3) and RSI/MACD/extra indicator panels
-  (Stage 4) not built yet.
-- **Display note:** matplotlib's interactive window doesn't reliably render
-  scatter overlays (pivot/pattern markers) on this machine — candles/volume
-  show fine, but marker artists silently fail to render live even at large
-  sizes, while saving to a file renders them correctly every time. So
-  `plot_chart()` always renders to a PNG; if no permanent `save_path` is
-  given, it saves to a temp file and opens it in the default image viewer
-  rather than using matplotlib's interactive window.
+- **Status:** in progress (`src/charting.py: plot_chart`). Renders the
+  candlestick + volume chart with Stage 2's pivot markers, Stage 3's
+  triangle/bull-flag overlays, and Stage 4's Bollinger Band overlay /
+  ADX-DMI+MACD extra panels, all working. Combinations #3-5's chart
+  wiring will follow as each is built.
+- **Charting library: Plotly, not matplotlib/mplfinance.** The chart
+  originally used mplfinance, but its interactive window didn't reliably
+  render scatter overlays (pivot/pattern markers) on this machine —
+  candles/volume showed fine, but marker artists silently failed to
+  render live even at large sizes, while saving to a file rendered them
+  correctly every time. Once genuine interactivity (hover tooltips
+  showing exact values, pan/zoom) was wanted on top of that, the project
+  switched to Plotly instead of continuing to patch around matplotlib's
+  static rendering:
+  - Plotly renders self-contained HTML/JS and opens in the browser,
+    giving hover tooltips and pan/zoom natively, with no dependency on a
+    native GUI toolkit (the exact category of thing that was already
+    unreliable here).
+    An alternative considered was a Python wrapper around TradingView's
+    own `lightweight-charts` JS library, which would give genuine
+    drag-resizable panels (Plotly only supports setting panel height
+    ratios in code, not resizing them live in the browser) and a more
+    authentic TradingView crosshair - but it's a much smaller, newer
+    dependency that runs via its own native webview window, reintroducing
+    the same class of native-rendering risk this switch was meant to
+    avoid. Revisit if drag-resize turns out to matter more than expected.
+  - `plot_chart()` always renders to HTML; if no permanent `save_path` is
+    given, it saves to a temp file and opens it in the default browser.
+  - `include_plotlyjs=True` embeds the whole Plotly.js library in the
+    output file (a few MB) rather than loading it from a CDN, so charts
+    render correctly offline.
 
 ### Stage 6 — Modeling
 - Start simple: logistic regression or gradient boosting (XGBoost/LightGBM)
