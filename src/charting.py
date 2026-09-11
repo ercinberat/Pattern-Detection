@@ -89,9 +89,14 @@ def _triangle_trendline_traces(price_data: pd.DataFrame, triangle: TrianglePatte
     ]
 
     trendline_style = dict(mode="lines", line=dict(color="#ab47bc", width=1.5), showlegend=False)
+    # PLAN.md's Stage 5b calls for the trendlines to be labeled with fit
+    # quality (r²) and how much the range has contracted, so both are
+    # shown on hover rather than just the price at that point.
+    upper_hover = f"Triangle high trendline: %{{y:.2f}}<br>Fit (r²): {triangle.high_r_squared:.2f}<br>Contraction: {triangle.contraction_pct:.0f}%<extra></extra>"
+    lower_hover = f"Triangle low trendline: %{{y:.2f}}<br>Fit (r²): {triangle.low_r_squared:.2f}<br>Contraction: {triangle.contraction_pct:.0f}%<extra></extra>"
     return [
-        go.Scatter(x=x_values, y=upper_y, hovertemplate="Triangle high trendline: %{y:.2f}<extra></extra>", **trendline_style),
-        go.Scatter(x=x_values, y=lower_y, hovertemplate="Triangle low trendline: %{y:.2f}<extra></extra>", **trendline_style),
+        go.Scatter(x=x_values, y=upper_y, hovertemplate=upper_hover, **trendline_style),
+        go.Scatter(x=x_values, y=lower_y, hovertemplate=lower_hover, **trendline_style),
     ]
 
 
@@ -104,23 +109,28 @@ def _bull_flag_line_traces(price_data: pd.DataFrame, bull_flag: BullFlagPattern)
     pole_end_price = price_data.loc[bull_flag.pole_end_date, "Close"]
 
     flag_style = dict(mode="lines", line=dict(color="#66bb6a", width=1.5), showlegend=False)
+    # PLAN.md's Stage 5b calls for the flag to be labeled with the pole's
+    # return and the flag's volume ratio, so both are shown on hover
+    # rather than just the price at that point.
+    pole_hover = f"Bull flag pole: %{{y:.2f}}<br>Pole return: {bull_flag.pole_return_pct:.1f}%<extra></extra>"
+    flag_hover_suffix = f"<br>Flag volume ratio: {bull_flag.flag_volume_ratio:.2f}<extra></extra>"
     return [
         go.Scatter(
             x=[bull_flag.pole_start_date, bull_flag.pole_end_date],
             y=[pole_start_price, pole_end_price],
-            hovertemplate="Bull flag pole: %{y:.2f}<extra></extra>",
+            hovertemplate=pole_hover,
             **flag_style,
         ),
         go.Scatter(
             x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
             y=[bull_flag.flag_high, bull_flag.flag_high],
-            hovertemplate="Flag high: %{y:.2f}<extra></extra>",
+            hovertemplate="Flag high: %{y:.2f}" + flag_hover_suffix,
             **flag_style,
         ),
         go.Scatter(
             x=[bull_flag.flag_start_date, bull_flag.flag_end_date],
             y=[bull_flag.flag_low, bull_flag.flag_low],
-            hovertemplate="Flag low: %{y:.2f}<extra></extra>",
+            hovertemplate="Flag low: %{y:.2f}" + flag_hover_suffix,
             **flag_style,
         ),
     ]

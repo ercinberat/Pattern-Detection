@@ -164,6 +164,14 @@ Plus swing-trading-specific features:
 ### Stage 5b — Visualization
 - TradingView-style dark theme, multi-panel chart: candlesticks + volume +
   RSI + MACD stacked below price, shared x-axis.
+  - **Deviation from this description:** RSI and MACD are not always-on
+    default panels. Once Stage 4 grew into five different indicator
+    combinations (not just RSI/MACD), every indicator's panel(s) became
+    opt-in via `main.py --indicator N` instead - a plain run with no
+    `--indicator` shows neither. This is a deliberate call, not an
+    oversight: keeping the default chart uncluttered mattered more than
+    matching the original always-on RSI/MACD wording once there were five
+    combinations to choose from instead of two.
 - Every detected pattern is drawn directly on the price panel: triangle
   trendlines (with r² and contraction ratio labeled), bull flag pole/flag
   zones (with pole return and volume ratio labeled), swing high/low pivot
@@ -178,11 +186,18 @@ Plus swing-trading-specific features:
 - Being built incrementally alongside each stage (rather than only at the
   end) so every stage's output can be visually sanity-checked as it's
   built, per an explicit decision to deviate from strict pipeline order.
-- **Status:** in progress (`src/charting.py: plot_chart`). Renders the
-  candlestick + volume chart with Stage 2's pivot markers, Stage 3's
-  triangle/bull-flag overlays, and Stage 4's Bollinger Band overlay /
-  ADX-DMI+MACD extra panels, all working. Combinations #3-5's chart
-  wiring will follow as each is built.
+- **Status:** done (`src/charting.py: plot_chart`). Renders the
+  candlestick + volume chart with Stage 2's pivot markers; Stage 3's
+  triangle/bull-flag overlays, now labeled on hover with r²/contraction %
+  (triangles) and pole return/volume ratio (bull flags), per this
+  stage's original description; all five of Stage 4's indicator
+  combinations, each wired to either `price_overlays` (Bollinger Bands,
+  Donchian Channel, 52-week high - series sharing the price panel's own
+  scale) or `extra_panels` (ADX/DMI, MACD, OBV, RSI, ATR, Relative
+  Strength - series needing their own stacked panel); and Stage 5's
+  labeled trade outcomes (`labels` parameter - a dotted entry-to-exit
+  line per pattern, colored green/red/grey for target/stop/time). A
+  dashed vertical crosshair spans every panel on hover.
 - **Charting library: Plotly, not matplotlib/mplfinance.** The chart
   originally used mplfinance, but its interactive window didn't reliably
   render scatter overlays (pivot/pattern markers) on this machine —

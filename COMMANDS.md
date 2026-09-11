@@ -74,7 +74,10 @@ scatter overlays on this machine; see `PLAN.md`'s Stage 5b notes for the
 full reasoning.
 
 Triangle trendlines are drawn in purple, bull flag pole/box lines in
-green, on top of the orange/blue pivot markers. Indicators #1, #3, and #5
+green, on top of the orange/blue pivot markers - hovering over a
+trendline shows its fit quality (r²) and contraction %, and hovering
+over a flag line shows the pole's return % and the flag's volume ratio.
+Indicators #1, #3, and #5
 add lines directly on the price panel (Bollinger Bands, Donchian Channel,
 52-week high); #2, #3, #4, and #5 also add their own panel(s) stacked
 below price/volume (ADX/DMI + MACD, OBV, RSI + ATR, Relative Strength).

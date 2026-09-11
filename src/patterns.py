@@ -85,6 +85,7 @@ class TrianglePattern:
     low_slope: float
     low_intercept: float
     low_r_squared: float
+    contraction_pct: float  # how much the high/low trendline gap shrank over the window
 
 
 @dataclass
@@ -246,6 +247,7 @@ def detect_triangles(
                 low_slope=low_slope,
                 low_intercept=low_intercept,
                 low_r_squared=low_r_squared,
+                contraction_pct=contraction_pct,
             )
         )
 
