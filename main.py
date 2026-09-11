@@ -2,12 +2,13 @@
 Main entry point: runs the pipeline as it exists today for a single
 ticker - fetch daily price history (Stage 1), find its swing pivots
 (Stage 2), detect triangle/bull-flag candidates (Stage 3), compute
-confirmation indicator features for each one (Stage 4), and plot the
-result (Stage 5b) - so the pieces built so far can be exercised end-to-end
-without importing each module by hand.
+confirmation indicator features for each one (Stage 4), optionally label
+each pattern's outcome (Stage 5), and plot the result (Stage 5b) - so the
+pieces built so far can be exercised end-to-end without importing each
+module by hand.
 
-As later stages (labeling, modeling, backtesting) are built, this script
-is where they get wired into the same end-to-end run.
+As later stages (modeling, backtesting) are built, this script is where
+they get wired into the same end-to-end run.
 """
 
 import argparse
@@ -26,6 +27,7 @@ from src.indicators import (
     compute_relative_strength,
     compute_rsi,
 )
+from src.labeling import label_patterns
 from src.patterns import (
     BullFlagPattern,
     TrianglePattern,
@@ -45,19 +47,25 @@ def run(
     pivot_order: int = 5,
     period: str = "2y",
     indicator_number: int = None,
+    label_outcomes: bool = False,
     save_path: str = None,
 ) -> None:
     """
     Fetch a ticker's daily price history, find its swing pivots, and
     detect triangle/bull-flag candidates. If indicator_number is given,
     also compute confirmation indicator features for each detected
-    pattern using that Stage 4 indicator combination. Then plot the
-    result.
+    pattern using that Stage 4 indicator combination. If label_outcomes
+    is True, also label each detected pattern's outcome (Stage 5). Then
+    plot the result.
 
     indicator_number: which entry of indicators.INDICATOR_COMBINATIONS to
         run, numbered to match PLAN.md's Stage 4 table (e.g. 1 = Bollinger
         Band squeeze + volume surge). If None (the default), Stage 4 is
         skipped entirely - only Stages 1-3 and the chart run.
+    label_outcomes: if True, run src.labeling.label_patterns() on every
+        detected pattern using its default fixed target/stop/time exit
+        rule, print a win-rate summary, and draw each labeled trade on
+        the chart.
     save_path: passed straight through to plot_chart() - if given, saves
         the chart to this file instead of opening a browser tab. Useful
         for scripted/repeated runs, e.g. scripts/end_to_end_test.py.
@@ -164,6 +172,23 @@ def run(
                 {"ylabel": "Relative Strength", "lines": {"Relative Strength": relative_strength}, "colors": {"Relative Strength": "#ab47bc"}},
             ]
 
+    labels = None
+    if label_outcomes:
+        # Stage 5: label whether each pattern's breakout actually
+        # followed through, using the default fixed target/stop/time
+        # exit rule (see src/labeling.py). Patterns too close to the end
+        # of price_data to have a full holding period yet are silently
+        # skipped by label_patterns() rather than counted as failures.
+        labels = label_patterns(price_data, patterns)
+        successful_count = sum(label["is_successful"] for label in labels)
+        print(f"Labeled {len(labels)} of {len(patterns)} patterns ({successful_count} successful):")
+        for label in labels:
+            pattern_type = "triangle" if isinstance(label["pattern"], TrianglePattern) else "bull flag"
+            print(
+                f"  {pattern_type} entered {label['entry_date'].date()}: "
+                f"{label['exit_reason']} exit, return {label['return_pct']:.1f}%, successful={label['is_successful']}"
+            )
+
     plot_chart(
         price_data,
         ticker=ticker,
@@ -171,6 +196,7 @@ def run(
         patterns=patterns,
         price_overlays=price_overlays,
         extra_panels=extra_panels,
+        labels=labels,
         save_path=save_path,
     )
 
@@ -203,6 +229,11 @@ if __name__ == "__main__":
         choices=sorted(INDICATOR_COMBINATIONS.keys()),
         help="Which Stage 4 indicator combination to run, numbered per PLAN.md's table (default: none - Stage 4 is skipped)",
     )
+    parser.add_argument(
+        "--label",
+        action="store_true",
+        help="Label each detected pattern's outcome (Stage 5's fixed target/stop/time exit rule) and draw it on the chart",
+    )
     args = parser.parse_args()
 
-    run(args.ticker, pivot_order=args.order, period=args.period, indicator_number=args.indicator)
+    run(args.ticker, pivot_order=args.order, period=args.period, indicator_number=args.indicator, label_outcomes=args.label)

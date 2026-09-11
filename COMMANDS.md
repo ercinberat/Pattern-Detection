@@ -37,6 +37,7 @@ python main.py TSLA --order 8          # fewer, more significant swing pivots
 python main.py TSLA --period 5y        # more history
 python main.py AAPL --indicator 1      # also run Bollinger squeeze + volume surge
 python main.py AAPL --indicator 5      # also run 52-week-high proximity + relative strength vs. SPY
+python main.py AAPL --label            # also label each pattern's outcome (Stage 5) and draw it on the chart
 ```
 
 Arguments:
@@ -59,6 +60,10 @@ Arguments:
 
   If omitted, Stage 4 is skipped entirely - no console output, no extra
   chart content.
+- `--label` (optional flag, default off) — label each detected pattern's
+  outcome using Stage 5's fixed target/stop/time exit rule (10% target,
+  5% stop, 20-bar max hold, by default), print a win-rate summary, and
+  draw each labeled trade on the chart.
 
 The chart is an interactive Plotly page that opens automatically in your
 default browser (not a static image) - hover over any candle, marker, or
@@ -79,6 +84,10 @@ Hovering anywhere on the chart draws a dashed vertical crosshair line
 through every panel at that date, not just the one panel being hovered -
 useful for reading price/volume/indicator values together at a glance.
 
+When `--label` is given, each labeled trade is drawn as a dotted line
+from its entry to its exit price/date: green if the target was hit,
+red if stopped out, grey if it timed out without hitting either.
+
 ### Running individual stages directly
 
 Each module also has its own quick manual check under `if __name__ ==
@@ -90,6 +99,7 @@ python -m scripts.fetch_real_data   # fetches AAPL data and prints it (no chart)
 python -m src.charting              # fetches AAPL data, plots plain candlestick + volume chart
 python -m src.patterns              # fetches AAPL data, finds pivots, plots chart with pivot markers
 python -m src.indicators            # fetches AAPL data, detects patterns, prints every indicator's features (no chart)
+python -m src.labeling              # fetches AAPL data, detects patterns, prints each one's labeled outcome (no chart)
 ```
 
 Note: run these with `-m` (e.g. `python -m src.patterns`), not
@@ -101,11 +111,12 @@ root on Python's import path, so the cross-module imports (e.g.
 ### `scripts/end_to_end_test.py` — smoke test
 
 Runs the full real pipeline for a ticker (default AAPL) through every
-stage and every Stage 4 indicator combination, and prints PASS/FAIL for
-each step - catches exceptions, NaN feature values, and empty pattern
-detection. Not a pytest suite (it hits the live network via yfinance for
-real price data), so run it by hand after making changes rather than as
-part of an automated test run:
+stage - pattern detection, every Stage 4 indicator combination, Stage 5
+labeling, and chart generation (with and without indicators/labels) -
+and prints PASS/FAIL for each step - catches exceptions, NaN values, and
+empty pattern detection. Not a pytest suite (it hits the live network via
+yfinance for real price data), so run it by hand after making changes
+rather than as part of an automated test run:
 
 ```
 python -m scripts.end_to_end_test
@@ -133,15 +144,16 @@ printed above the final summary line.
 | `src/indicators.py` | `rsi_momentum_shift_and_atr_expansion(price_data, pattern, ...)` | 4 | Indicator #4: RSI shifting from a "basing" reading up through a momentum threshold + ATR expanding off a recent low (VCP-style). |
 | `src/indicators.py` | `near_52_week_high_and_relative_strength(price_data, pattern, benchmark_data, ...)` | 4 | Indicator #5: Close within X% of its 52-week high + outperforming a benchmark ticker's return. Needs a second ticker's data (`benchmark_data`) - see its docstring for how callers bind that in with `functools.partial`. |
 | `src/indicators.py` | `INDICATOR_COMBINATIONS` | 4 | Dict mapping each indicator's PLAN.md number (1-5, all built) to its name and feature function - how `main.py`'s `--indicator` looks up which one to run. |
-| `src/charting.py` | `plot_chart(price_data, ticker="", pivots=None, patterns=None, price_overlays=None, extra_panels=None, save_path=None)` | 5b | Renders an interactive Plotly candlestick + volume chart, one x-axis label per calendar month, with a dashed vertical crosshair on hover spanning every panel. Draws pivot markers if `pivots` is given, triangle/bull-flag overlays if `patterns` is given, price-scale indicator lines if `price_overlays` is given, and stacked indicator panels if `extra_panels` is given. |
-| `main.py` | `run(ticker, pivot_order=5, period="2y", indicator_number=None, save_path=None)` | — | Chains all of the above into one end-to-end run: fetch → pivots → triangles/bull-flags → (optionally) indicator features → plot. `save_path` is forwarded to `plot_chart()`, mainly for scripted callers like `scripts/end_to_end_test.py`. |
-| `scripts/end_to_end_test.py` | `run_smoke_test(ticker="AAPL", benchmark_ticker="SPY")` | — | Runs the full pipeline through every indicator combination and reports PASS/FAIL per check. See above. |
+| `src/labeling.py` | `label_pattern_outcome(price_data, pattern, target_pct=10.0, stop_pct=5.0, max_holding_days=20)` | 5 | Labels one pattern's breakout outcome using a fixed target/stop/time exit rule, entering at the Open right after the pattern's end date. Returns `None` if there isn't a full bar of data after the pattern yet. |
+| `src/labeling.py` | `label_patterns(price_data, patterns, ...)` | 5 | Runs `label_pattern_outcome()` over a list of patterns, skipping ones that return `None`, and tags each result with its source pattern/type. |
+| `src/charting.py` | `plot_chart(price_data, ticker="", pivots=None, patterns=None, price_overlays=None, extra_panels=None, labels=None, save_path=None)` | 5b | Renders an interactive Plotly candlestick + volume chart, one x-axis label per calendar month, with a dashed vertical crosshair on hover spanning every panel. Draws pivot markers if `pivots` is given, triangle/bull-flag overlays if `patterns` is given, price-scale indicator lines if `price_overlays` is given, stacked indicator panels if `extra_panels` is given, and labeled trade lines if `labels` is given. |
+| `main.py` | `run(ticker, pivot_order=5, period="2y", indicator_number=None, label_outcomes=False, save_path=None)` | — | Chains all of the above into one end-to-end run: fetch → pivots → triangles/bull-flags → (optionally) indicator features → (optionally) labeling → plot. `save_path` is forwarded to `plot_chart()`, mainly for scripted callers like `scripts/end_to_end_test.py`. |
+| `scripts/end_to_end_test.py` | `run_smoke_test(ticker="AAPL", benchmark_ticker="SPY")` | — | Runs the full pipeline through every indicator combination and labeling, and reports PASS/FAIL per check. See above. |
 
-All threshold values in `detect_triangles`/`detect_bull_flags` and every
-indicator combination are first-pass guesses, not yet validated against
-real outcomes — see `PLAN.md`'s Stage 3 "Next" note for the validation
-plan.
+All threshold values in `detect_triangles`/`detect_bull_flags`, every
+indicator combination, and the labeling exit rule are first-pass guesses,
+not yet validated against real outcomes — see `PLAN.md`'s Stage 3 "Next"
+note for the validation plan.
 
-Stage 5 (labeling), Stage 6 (modeling), and Stage 7 (backtesting) are not
-built yet — see `PLAN.md` for the full pipeline and current status of
-each stage.
+Stage 6 (modeling) and Stage 7 (backtesting) are not built yet — see
+`PLAN.md` for the full pipeline and current status of each stage.

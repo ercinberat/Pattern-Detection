@@ -19,6 +19,7 @@ import tempfile
 import main
 from scripts.fetch_real_data import fetch_daily_price_history
 from src.indicators import INDICATOR_COMBINATIONS
+from src.labeling import label_patterns
 from src.patterns import deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
 
 
@@ -80,6 +81,18 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
                 indicator_ok = False
         check(f"indicator #{indicator_number} ({combination['name']}) - clean features for every pattern", indicator_ok)
 
+    print("\n--- Stage 5: labeling ---")
+    try:
+        labels = label_patterns(price_data, patterns)
+        labels_ok = all(
+            label["exit_reason"] in ("target", "stop", "time") and not math.isnan(label["return_pct"]) for label in labels
+        )
+        successful_count = sum(label["is_successful"] for label in labels)
+        check(f"label_patterns produces clean labels ({len(labels)} of {len(patterns)} patterns, {successful_count} successful)", labels_ok)
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("label_patterns produces clean labels", False)
+
     print("\n--- Stage 5b: chart generation ---")
     for indicator_number in [None] + sorted(INDICATOR_COMBINATIONS.keys()):
         temp_file = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
@@ -91,6 +104,15 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
         except Exception as error:
             print(f"    exception: {error}")
             check(label, False)
+
+    temp_file = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
+    temp_file.close()
+    try:
+        main.run(ticker, label_outcomes=True, save_path=temp_file.name)
+        check("chart renders with labeled outcomes", True)
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("chart renders with labeled outcomes", False)
 
     print("\n" + ("ALL CHECKS PASSED" if all_passed else "SOME CHECKS FAILED"))
     return all_passed

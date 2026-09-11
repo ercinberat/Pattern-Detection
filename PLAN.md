@@ -144,7 +144,22 @@ Plus swing-trading-specific features:
   N bars after the breakout, without first hitting a stop-loss level?
 - Needs careful definition to avoid lookahead bias and to reflect a
   realistic swing-trade exit rule (e.g. target/stop/time-based exit).
-- **Status:** not started.
+- **Status:** done (`src/labeling.py`). `label_pattern_outcome(price_data,
+  pattern, target_pct=10.0, stop_pct=5.0, max_holding_days=20)` labels one
+  pattern using a fixed target/stop/time exit rule - the option chosen
+  from this stage's exit-rule open question below, kept simplest to
+  validate against first. Entry is the Open of the bar right after the
+  pattern's end date, so the label only ever looks at price data strictly
+  after the pattern's own detection point (avoiding lookahead bias). If
+  a bar's range covers both the stop and target, the stop is assumed hit
+  first (the conservative assumption, since daily bars don't say which
+  was actually touched first within the day). `label_patterns()` runs
+  this over a list of patterns, skipping ones too close to the end of the
+  data to label yet. Wired into `main.py --label`, which prints a
+  win-rate summary and draws each labeled trade on the chart (dotted line
+  from entry to exit, green/red/grey for target/stop/time).
+- ATR-based and trailing-stop exit rules were discussed and deliberately
+  left for later (see Open Questions) rather than building all three now.
 
 ### Stage 5b — Visualization
 - TradingView-style dark theme, multi-panel chart: candlesticks + volume +
@@ -267,6 +282,10 @@ Pattern-Detection/
 - Universe: single names, an index constituent list, or ETFs? Affects
   earnings-date handling and relative-strength baseline.
 - Exit rule for labeling: fixed target/stop, ATR-based, or trailing?
+  Fixed target/stop is what's built (see Stage 5) as the simplest
+  starting point; ATR-based and trailing stops remain options to add as
+  alternative exit rules once there's a labeled baseline to compare them
+  against.
 - Position sizing / risk management: out of scope for the detector itself,
   but needed before this becomes a tradeable strategy.
 - How much of the ML step is worth it vs. a simpler rule-based scoring

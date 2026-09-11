@@ -23,21 +23,7 @@ the others share - see its docstring below for how callers handle that.
 
 import pandas as pd
 
-from src.patterns import BullFlagPattern, TrianglePattern
-
-
-def _pattern_evaluation_date(pattern):
-    """
-    The date an indicator should be evaluated at for a given pattern: a
-    triangle's end_date, or a bull flag's flag_end_date. Both mean the
-    same thing - the last bar of the pattern candidate, where a breakout
-    would be expected to happen next.
-    """
-    if isinstance(pattern, TrianglePattern):
-        return pattern.end_date
-    if isinstance(pattern, BullFlagPattern):
-        return pattern.flag_end_date
-    raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
+from src.patterns import BullFlagPattern, TrianglePattern, pattern_evaluation_date
 
 
 def compute_bollinger_bands(price_data: pd.DataFrame, band_window: int = 20, band_num_std: float = 2.0) -> pd.DataFrame:
@@ -122,7 +108,7 @@ def bollinger_squeeze_and_volume_surge(
         is_volume_surge: True if volume_ratio is at least
             volume_surge_ratio.
     """
-    evaluation_date = _pattern_evaluation_date(pattern)
+    evaluation_date = pattern_evaluation_date(pattern)
     bands = compute_bollinger_bands(price_data, band_window=band_window, band_num_std=band_num_std)
 
     # Rank today's width against its own trailing history: what fraction
@@ -278,7 +264,7 @@ def adx_trend_filter_and_macd_flip(
         is_macd_bullish_flip: True if the histogram was negative at the
             start of the lookback window and positive now.
     """
-    evaluation_date = _pattern_evaluation_date(pattern)
+    evaluation_date = pattern_evaluation_date(pattern)
 
     adx_dmi = compute_adx_dmi(price_data, window=adx_window)
     macd = compute_macd(
@@ -389,7 +375,7 @@ def donchian_breakout_and_obv_confirmation(
         is_obv_new_high: True if obv is above obv_recent_high - OBV
             itself just broke out to a new high alongside price.
     """
-    evaluation_date = _pattern_evaluation_date(pattern)
+    evaluation_date = pattern_evaluation_date(pattern)
 
     channel = compute_donchian_channel(price_data, window=donchian_window)
     obv_series = compute_obv(price_data)
@@ -507,7 +493,7 @@ def rsi_momentum_shift_and_atr_expansion(
         is_atr_expanding: True if atr is at least atr_expansion_ratio
             times atr_recent_low.
     """
-    evaluation_date = _pattern_evaluation_date(pattern)
+    evaluation_date = pattern_evaluation_date(pattern)
 
     rsi_series = compute_rsi(price_data, window=rsi_window)
     atr_series = compute_atr(price_data, window=atr_window)
@@ -613,7 +599,7 @@ def near_52_week_high_and_relative_strength(
         is_outperforming_benchmark: True if relative_strength is above
             1.0.
     """
-    evaluation_date = _pattern_evaluation_date(pattern)
+    evaluation_date = pattern_evaluation_date(pattern)
 
     pct_from_high_series = compute_pct_from_52_week_high(price_data, window=proximity_window)
     relative_strength_series = compute_relative_strength(price_data, benchmark_data, lookback=relative_strength_lookback)

@@ -126,6 +126,36 @@ def _bull_flag_line_traces(price_data: pd.DataFrame, bull_flag: BullFlagPattern)
     ]
 
 
+# Exit reason -> color, shared between the entry-to-exit line and the
+# exit marker, so a label's outcome is visually obvious at a glance:
+# green for a target hit, red for a stop-out, grey for timing out.
+_LABEL_OUTCOME_COLORS = {"target": "#26a69a", "stop": "#ef5350", "time": "#787b86"}
+
+
+def _label_traces(label: dict):
+    """
+    Build the entry-to-exit line and markers for one labeled pattern
+    outcome (src/labeling.py's label_pattern_outcome()) - a straight line
+    from the entry price/date to the exit price/date, colored by whether
+    the exit was a target hit, a stop-out, or a time-based exit.
+    """
+    outcome_color = _LABEL_OUTCOME_COLORS[label["exit_reason"]]
+    trade_line = go.Scatter(
+        x=[label["entry_date"], label["exit_date"]],
+        y=[label["entry_price"], label["exit_price"]],
+        mode="lines+markers",
+        line=dict(color=outcome_color, width=2, dash="dot"),
+        marker=dict(size=6, color=outcome_color),
+        showlegend=False,
+        hovertemplate=(
+            f"Entry: {label['entry_price']:.2f} on {label['entry_date'].date()}<br>"
+            f"Exit ({label['exit_reason']}): {label['exit_price']:.2f} on {label['exit_date'].date()}<br>"
+            f"Return: {label['return_pct']:.1f}%<extra></extra>"
+        ),
+    )
+    return [trade_line]
+
+
 def plot_chart(
     price_data: pd.DataFrame,
     ticker: str = "",
@@ -133,6 +163,7 @@ def plot_chart(
     patterns=None,
     price_overlays=None,
     extra_panels=None,
+    labels=None,
     save_path: str = None,
 ):
     """
@@ -178,6 +209,10 @@ def plot_chart(
         given a color there cycles through a default palette. One panel
         is added per entry in the list, in order, below the price/volume
         panels.
+    labels: optional list of dicts (Stage 5's label_patterns() output) -
+        each drawn as a dotted line from the entry to the exit price/date,
+        colored green for a target hit, red for a stop-out, or grey for a
+        time-based exit.
     save_path: if given, saves the chart permanently to this HTML file
         path (e.g. for building up a folder of chart snapshots). If not
         given, the chart is saved to a temporary HTML file and opened
@@ -278,6 +313,11 @@ def plot_chart(
             elif isinstance(pattern, BullFlagPattern):
                 for trace in _bull_flag_line_traces(price_data, pattern):
                     fig.add_trace(trace, row=1, col=1)
+
+    if labels:
+        for label in labels:
+            for trace in _label_traces(label):
+                fig.add_trace(trace, row=1, col=1)
 
     # Volume panel: color each bar the same up/down color as its candle.
     volume_colors = [
