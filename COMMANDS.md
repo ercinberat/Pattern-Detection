@@ -17,7 +17,8 @@ pip install -r requirements.txt
 
 Current dependencies: `yfinance` (pulling price data), `pandas` (data
 handling), `plotly` (interactive charting), `scipy` (trendline regression
-fits for triangle detection).
+fits for triangle detection), `requests` (fetching the S&P 500 ticker
+list), `lxml` (parsing that list's HTML table).
 
 ---
 
@@ -62,8 +63,11 @@ Arguments:
   chart content.
 - `--label` (optional flag, default off) — label each detected pattern's
   outcome using Stage 5's fixed target/stop/time exit rule (10% target,
-  5% stop, 20-bar max hold, by default), print a win-rate summary, and
-  draw each labeled trade on the chart.
+  5% stop, 20-bar max hold, by default), print a win-rate + mean-return
+  summary, and draw each labeled trade on the chart. Win rate only counts
+  an exit_reason of "target" as a win, so mean return is reported
+  alongside it - a pattern that times out at +7% and one stopped out at
+  -5% look identical by win rate alone, but not by return.
 
 The chart is an interactive Plotly page that opens automatically in your
 default browser (not a static image) - hover over any candle, marker, or
@@ -98,7 +102,7 @@ Each module also has its own quick manual check under `if __name__ ==
 through the full pipeline:
 
 ```
-python -m scripts.fetch_real_data   # fetches AAPL data and prints it (no chart)
+python -m scripts.fetch_real_data   # fetches AAPL data, prints it, and prints the current S&P 500 ticker list (no chart)
 python -m src.charting              # fetches AAPL data, plots plain candlestick + volume chart
 python -m src.patterns              # fetches AAPL data, finds pivots, plots chart with pivot markers
 python -m src.indicators            # fetches AAPL data, detects patterns, prints every indicator's features (no chart)
@@ -129,17 +133,42 @@ Exits with code 0 if everything passed, 1 if anything failed - the
 failing check's label and, where relevant, the exception message are
 printed above the final summary line.
 
+### `scripts/build_dataset.py` — Stage 6's training dataset
+
+Runs pivot/pattern detection and labeling across a whole universe of
+tickers (the current S&P 500 constituents by default) instead of just
+one, and saves every labeled pattern to a single CSV - the multi-ticker
+dataset Stage 6's model (and Stage 3's threshold-validation sweep) needs,
+since one ticker's history alone isn't enough examples for either to mean
+anything statistically.
+
+```
+python -m scripts.build_dataset                          # full S&P 500, ~2y each, saves to data/labeled_patterns.csv
+python -m scripts.build_dataset --limit 20                # quick test run on the first 20 tickers only
+python -m scripts.build_dataset --period 5y               # more history per ticker
+python -m scripts.build_dataset --output data/other.csv   # save somewhere else
+```
+
+Tickers that fail to fetch (delisted, too new to have a full `period` of
+history, etc.) are skipped with a printed message rather than stopping
+the whole run. Scanning the full universe makes ~500 network calls, so
+it takes a while - each ticker's data gets cached (see
+`fetch_daily_price_history`'s `use_cache`), so re-running the script
+later doesn't re-download tickers it already has.
+
 ---
 
 ## What each piece does
 
 | File | Function | Stage | What it does |
 |---|---|---|---|
-| `scripts/fetch_real_data.py` | `fetch_daily_price_history(ticker, period="2y")` | 1 | Pulls daily OHLCV data for a ticker via `yfinance`. |
+| `scripts/fetch_real_data.py` | `fetch_daily_price_history(ticker, period="2y", use_cache=True)` | 1 | Pulls daily OHLCV data for a ticker via `yfinance`, caching to `data/` so repeat calls don't re-download. |
+| `scripts/fetch_real_data.py` | `fetch_sp500_tickers()` | 1 | Scrapes the current S&P 500 constituent list from Wikipedia (today's membership, not point-in-time history). |
 | `src/patterns.py` | `find_pivots(price_data, order=5)` | 2 | Finds swing highs/lows using a fractal (rolling-extrema) method. |
 | `src/patterns.py` | `detect_triangles(pivots, window=40, ...)` | 3 | Fits trendlines to swing highs/lows in a sliding window, classifies converging shapes as symmetrical/ascending/descending. Returns every overlapping window candidate, unfiltered. |
 | `src/patterns.py` | `deduplicate_triangles(triangles)` | 3 (chart helper) | Collapses overlapping triangle candidates down to the single best-fitting one per cluster, purely to keep charts readable. |
-| `src/patterns.py` | `detect_bull_flags(price_data, pole_lookback=10, ...)` | 3 | Finds a sharp pole move followed by a tight, low-volume flag consolidation. |
+| `src/patterns.py` | `detect_bull_flags(price_data, pole_lookback=10, ...)` | 3 | Finds a sharp pole move followed by a tight, low-volume flag consolidation. Returns every overlapping candidate, unfiltered. |
+| `src/patterns.py` | `deduplicate_bull_flags(bull_flags)` | 3 (chart helper) | Collapses overlapping bull-flag candidates down to the one with the strongest pole per cluster, purely to keep charts and datasets clean. |
 | `src/indicators.py` | `compute_bollinger_bands` / `compute_adx_dmi` / `compute_macd` / `compute_donchian_channel` / `compute_obv` / `compute_rsi` / `compute_atr` / `compute_pct_from_52_week_high` / `compute_relative_strength` | 4 | The full-series version of each building block, for charting (each corresponding `*_and_*`/`*_confirmation` feature function below evaluates one of these at a single pattern's end date instead). |
 | `src/indicators.py` | `bollinger_squeeze_and_volume_surge(price_data, pattern, ...)` | 4 | Indicator #1: Bollinger Band squeeze (narrow bands vs. their own recent history) + volume surge. |
 | `src/indicators.py` | `adx_trend_filter_and_macd_flip(price_data, pattern, ...)` | 4 | Indicator #2: ADX/DMI trend filter (real, upward trend) + a recent bullish MACD histogram flip. |
@@ -152,11 +181,13 @@ printed above the final summary line.
 | `src/charting.py` | `plot_chart(price_data, ticker="", pivots=None, patterns=None, price_overlays=None, extra_panels=None, labels=None, save_path=None)` | 5b | Renders an interactive Plotly candlestick + volume chart, one x-axis label per calendar month, with a dashed vertical crosshair on hover spanning every panel. Draws pivot markers if `pivots` is given, triangle/bull-flag overlays if `patterns` is given, price-scale indicator lines if `price_overlays` is given, stacked indicator panels if `extra_panels` is given, and labeled trade lines if `labels` is given. |
 | `main.py` | `run(ticker, pivot_order=5, period="2y", indicator_number=None, label_outcomes=False, save_path=None)` | — | Chains all of the above into one end-to-end run: fetch → pivots → triangles/bull-flags → (optionally) indicator features → (optionally) labeling → plot. `save_path` is forwarded to `plot_chart()`, mainly for scripted callers like `scripts/end_to_end_test.py`. |
 | `scripts/end_to_end_test.py` | `run_smoke_test(ticker="AAPL", benchmark_ticker="SPY")` | — | Runs the full pipeline through every indicator combination and labeling, and reports PASS/FAIL per check. See above. |
+| `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5)` | 6 | Runs detection + labeling across a list of tickers and combines every labeled pattern into one DataFrame, skipping tickers that fail to fetch. See above. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,
 not yet validated against real outcomes — see `PLAN.md`'s Stage 3 "Next"
 note for the validation plan.
 
-Stage 6 (modeling) and Stage 7 (backtesting) are not built yet — see
-`PLAN.md` for the full pipeline and current status of each stage.
+Stage 6's multi-ticker dataset pipeline is built (`scripts/build_dataset.py`),
+but the model itself (and Stage 7's backtesting) is not — see `PLAN.md`
+for the full pipeline and current status of each stage.

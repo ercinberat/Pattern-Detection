@@ -138,12 +138,12 @@ if __name__ == "__main__":
     # patterns, and print the label for each one, so the outcomes can be
     # sanity-checked against the chart by eye.
     from scripts.fetch_real_data import fetch_daily_price_history
-    from src.patterns import deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
+    from src.patterns import deduplicate_bull_flags, deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
 
     aapl_daily_data = fetch_daily_price_history("AAPL")
     aapl_pivots = find_pivots(aapl_daily_data, order=5)
     aapl_triangles = deduplicate_triangles(detect_triangles(aapl_pivots))
-    aapl_bull_flags = detect_bull_flags(aapl_daily_data)
+    aapl_bull_flags = deduplicate_bull_flags(detect_bull_flags(aapl_daily_data))
 
     aapl_labels = label_patterns(aapl_daily_data, aapl_triangles + aapl_bull_flags)
     for label in aapl_labels:

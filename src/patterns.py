@@ -370,6 +370,43 @@ def detect_bull_flags(
     return bull_flags
 
 
+def deduplicate_bull_flags(bull_flags: list[BullFlagPattern]) -> list[BullFlagPattern]:
+    """
+    Collapse heavily overlapping bull flag candidates down to the single
+    best one per overlapping cluster - purely to make charts readable, the
+    same problem deduplicate_triangles() solves for triangles.
+    detect_bull_flags() checks every bar as a possible pole start, so one
+    real pole-and-flag move in the price data can get detected again and
+    again from poles starting a few days apart that all land on
+    essentially the same flag. detect_bull_flags() itself still returns
+    every one of those raw candidates unchanged; this is a separate
+    filtering step to run before charting.
+
+    Bull flags are grouped into a cluster whenever their pole-to-flag date
+    ranges overlap, and the one with the strongest pole (highest
+    pole_return_pct) is kept from each cluster.
+    """
+    if not bull_flags:
+        return []
+
+    sorted_bull_flags = sorted(bull_flags, key=lambda bull_flag: bull_flag.pole_start_date)
+
+    clusters = [[sorted_bull_flags[0]]]
+    for bull_flag in sorted_bull_flags[1:]:
+        current_cluster = clusters[-1]
+        cluster_end_date = max(member.flag_end_date for member in current_cluster)
+        if bull_flag.pole_start_date <= cluster_end_date:
+            # This candidate's pole-to-flag window overlaps the current
+            # cluster's date range, so it's almost certainly the same
+            # underlying pole-and-flag move, detected again from a
+            # slightly shifted pole start.
+            current_cluster.append(bull_flag)
+        else:
+            clusters.append([bull_flag])
+
+    return [max(cluster, key=lambda bull_flag: bull_flag.pole_return_pct) for cluster in clusters]
+
+
 if __name__ == "__main__":
     # Quick manual check: fetch AAPL's daily history, find its pivots, and
     # plot them so we can see the swing highs/lows directly on the chart.

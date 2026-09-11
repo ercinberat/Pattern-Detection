@@ -147,6 +147,9 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# Cached OHLCV data (see PLAN.md's Stage 1) and other local project data
+data/
+
 # Environments
 .env
 .envrc

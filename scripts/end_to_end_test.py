@@ -20,7 +20,7 @@ import main
 from scripts.fetch_real_data import fetch_daily_price_history
 from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
-from src.patterns import deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
+from src.patterns import deduplicate_bull_flags, deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
 
 
 def _has_nan_value(features: dict) -> bool:
@@ -56,7 +56,7 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
     check("find_pivots adds swing_high/swing_low columns", {"swing_high", "swing_low"} <= set(pivots.columns))
 
     triangles = deduplicate_triangles(detect_triangles(pivots))
-    bull_flags = detect_bull_flags(price_data)
+    bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
     patterns = triangles + bull_flags
     check(
         f"pattern detection finds at least one pattern ({len(triangles)} triangles, {len(bull_flags)} bull flags)",

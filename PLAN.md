@@ -25,9 +25,19 @@ The project has three layers:
 - Pull daily OHLCV via `yfinance` for a configurable universe of tickers.
 - Cache raw data locally (CSV/parquet) to avoid re-downloading during
   iteration.
-- **Status:** done (`scripts/fetch_real_data.py: fetch_daily_price_history`) -
-  pulls daily OHLCV for a single ticker via yfinance. Still needs a proper
-  caching layer and multi-ticker batch support.
+- **Status:** done. `fetch_daily_price_history(ticker, period="2y",
+  use_cache=True)` pulls daily OHLCV for a single ticker via yfinance,
+  caching each ticker's data to a CSV under `data/` (gitignored) so
+  re-running a script that fetches the same tickers doesn't re-download
+  them. `fetch_sp500_tickers()` scrapes the current S&P 500 constituent
+  list from Wikipedia (needs a browser-like `User-Agent` header, or
+  Wikipedia returns a 403) - the "configurable universe of tickers" and
+  multi-ticker batch support this stage needed, built once Stage 6
+  needed many more labeled examples than one ticker could provide (see
+  Stage 6 below). Uses today's constituent list, not point-in-time
+  historical membership - a stock added to or dropped from the index
+  within the fetch window won't necessarily have been a member for all
+  of it, a form of survivorship bias worth keeping in mind.
 
 ### Stage 2 — Pivot detection
 - Identify swing highs/lows using a rolling-extrema (fractal) method.
@@ -42,12 +52,16 @@ The project has three layers:
 - **Bullish flags:** detect a sharp "pole" move followed by a tight,
   low-volatility, low-volume "flag" consolidation.
 - **Status:** done (`src/patterns.py: detect_triangles`,
-  `detect_bull_flags`). `detect_triangles()` returns every overlapping
-  sliding-window candidate as-is (by design - Stage 4 is where
-  confirmation/filtering belongs); a separate `deduplicate_triangles()`
-  collapses overlapping candidates down to one per cluster, purely for
-  readable charts. Verified visually on real AAPL data via `plot_chart()`'s
-  triangle trendline / bull flag pole+box overlays.
+  `detect_bull_flags`). Both return every overlapping sliding-window
+  candidate as-is (by design - Stage 4 is where confirmation/filtering
+  belongs); separate `deduplicate_triangles()`/`deduplicate_bull_flags()`
+  functions each collapse overlapping candidates down to one per cluster
+  (best combined r² for triangles, strongest pole return for bull flags),
+  purely for readable charts and clean downstream datasets. The bull-flag
+  version was added after `main.py --label` on CIEN showed one real
+  pole-and-flag move detected as 12 overlapping candidates - see Stage 6's
+  status for the full story. Verified visually on real AAPL/CIEN data via
+  `plot_chart()`'s triangle trendline / bull flag pole+box overlays.
 - **Next:** all thresholds (r², contraction %, flat-slope %, pole
   return %, flag range/volume/retracement %) are first-pass guesses,
   documented in each function's docstring - they haven't been tuned
@@ -230,7 +244,65 @@ Plus swing-trading-specific features:
   predicting breakout follow-through probability from Stage 4 features.
 - Use walk-forward validation (never a random train/test split on time
   series data) to avoid leaking future information.
-- **Status:** not started.
+- **Status:** the multi-ticker data pipeline this needed is built and has
+  been run (`scripts/build_dataset.py`); the model itself is not started
+  yet.
+  - Scanned all 503 current S&P 500 constituents, 2 years of daily data
+    each: 1,833 labeled patterns saved to `data/labeled_patterns.csv`
+    (gitignored - regenerate with `python -m scripts.build_dataset`).
+    Every ticker fetched successfully; 3 had zero qualifying patterns
+    over the window.
+  - **Two bugs were found and fixed after the first version of this scan**
+    (originally 2,273 patterns), both by real usage rather than by
+    inspection:
+    1. `fetch_daily_price_history()`'s cache read `pd.read_csv(...,
+       parse_dates=True)`, which silently failed to parse the date index
+       back into real `Timestamp`s when dates included a timezone offset
+       - they came back as plain strings. Anything reading from cache
+       worked by coincidental string-equality matching until code called
+       a `Timestamp`-only method (`.date()`), which crashed
+       `main.py --label` for any ticker being read from cache. Fixed by
+       parsing explicitly with `pd.to_datetime(..., utc=True)`.
+    2. `detect_bull_flags()` had no deduplication step, unlike
+       `detect_triangles()`/`deduplicate_triangles()` - one real
+       pole-and-flag move was routinely detected as 5-6 near-duplicate
+       bull flags on consecutive pole-start days (seen directly on CIEN's
+       chart: 12 patterns collapsed to 5 once fixed). Fixed by adding
+       `deduplicate_bull_flags()`, the same clustering approach as
+       triangles but keyed on the strongest pole (`pole_return_pct`) per
+       cluster, wired in everywhere `detect_bull_flags()` is called.
+    Re-running after both fixes changed bull-flag pattern count from 738
+    to 298 (-60%) and overall win rate from 21.5% to 22.3% - triangle
+    counts were unaffected (already deduplicated in the original run).
+  - Overall win rate 22.3% (409 target / 882 stop / 542 time), consistent
+    with the 20.0% median win rate among the 129 tickers with at least 5
+    patterns - not obviously skewed by a handful of outliers.
+  - Triangle (21.6%) and bull flag (25.8%) win rates now show a real gap,
+    where the first (buggy) run had called them "nearly identical" -
+    a reminder that this kind of infrastructure bug can distort not just
+    the totals but the comparisons drawn from them.
+  - Individual tickers range from 0% to 67% win rate even among those
+    with 5+ patterns, which may just be small-sample noise at that size
+    (5-8 examples) rather than a real per-ticker edge - not something to
+    read into yet.
+  - **Win rate alone hides real information: a pattern's `return_pct` is
+    reported alongside it everywhere now** (`main.py --label`'s console
+    output, `build_dataset.py`'s `print_summary()`, and the published
+    scan artifact), after a real example on WRB showed why - a triangle
+    that timed out at +7.2% counted identically to one stopped out at
+    -5%, since win rate only credits an exit_reason of "target". Mean
+    return doesn't discard that difference: overall mean return across
+    all 1,833 patterns is +0.4% (triangle +0.4%, bull flag +0.6%). This
+    doesn't change `is_successful`'s definition (still strictly
+    `exit_reason == "target"`, matching PLAN.md's original Stage 5
+    wording) - mean return is a second, complementary lens, not a
+    replacement.
+  - This dataset only has Stage 3's raw pattern detection and Stage 5's
+    labels - it does not yet have Stage 4's indicator features attached
+    per pattern, which the model will need as its input. Building that
+    feature matrix (running all 5 indicator combinations for every
+    pattern and joining the results to this dataset) is the next step
+    before any model code.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage

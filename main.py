@@ -31,6 +31,7 @@ from src.labeling import label_patterns
 from src.patterns import (
     BullFlagPattern,
     TrianglePattern,
+    deduplicate_bull_flags,
     deduplicate_triangles,
     detect_bull_flags,
     detect_triangles,
@@ -73,11 +74,11 @@ def run(
     price_data = fetch_daily_price_history(ticker, period=period)
     pivots = find_pivots(price_data, order=pivot_order)
 
-    # detect_triangles() finds every overlapping window candidate; collapse
-    # those down to one per cluster so the chart doesn't turn into a
-    # hairball of near-duplicate trendlines.
+    # detect_triangles()/detect_bull_flags() each find every overlapping
+    # window candidate; collapse those down to one per cluster so the
+    # chart doesn't turn into a hairball of near-duplicate trendlines/flags.
     triangles = deduplicate_triangles(detect_triangles(pivots))
-    bull_flags = detect_bull_flags(price_data)
+    bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
     patterns = triangles + bull_flags
 
     price_overlays = None
@@ -181,7 +182,16 @@ def run(
         # skipped by label_patterns() rather than counted as failures.
         labels = label_patterns(price_data, patterns)
         successful_count = sum(label["is_successful"] for label in labels)
-        print(f"Labeled {len(labels)} of {len(patterns)} patterns ({successful_count} successful):")
+        # Win rate (exit_reason == "target") is a strict, binary measure -
+        # a pattern that times out at +7% counts the same as one that gets
+        # stopped out at -5%, even though its return says otherwise. Mean
+        # return_pct is reported alongside it so a near-miss like that
+        # isn't invisible in the summary.
+        mean_return_pct = sum(label["return_pct"] for label in labels) / len(labels) if labels else 0.0
+        print(
+            f"Labeled {len(labels)} of {len(patterns)} patterns "
+            f"({successful_count} successful, mean return {mean_return_pct:.1f}%):"
+        )
         for label in labels:
             pattern_type = "triangle" if isinstance(label["pattern"], TrianglePattern) else "bull flag"
             print(
