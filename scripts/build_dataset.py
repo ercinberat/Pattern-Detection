@@ -1,8 +1,9 @@
 """
 Builds Stage 6's training dataset: runs the full detection + labeling
 pipeline (fetch -> pivots -> triangle/bull-flag detection -> labeling)
-across a universe of tickers, rather than just one, and saves every
-labeled pattern to a single file.
+across a universe of tickers, rather than just one, computes every Stage
+4 indicator combination's features for each pattern, and saves the whole
+thing - pattern, label, and features together - to a single file.
 
 This is the multi-ticker data pipeline that PLAN.md's Stage 1 ("needs...
 multi-ticker batch support") and Stage 3 ("Next" note) both call for:
@@ -12,31 +13,49 @@ either means anything statistically.
 """
 
 import argparse
+import functools
 import os
 
 import pandas as pd
 
 from scripts.fetch_real_data import fetch_daily_price_history, fetch_sp500_tickers
+from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
 from src.patterns import deduplicate_bull_flags, deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
 
+# Combination #5 needs a second ticker's data to compare against; SPY (an
+# S&P 500 ETF) is used as a general-market benchmark, same as main.py.
+_DEFAULT_BENCHMARK_TICKER = "SPY"
 
-def build_labeled_dataset(tickers: list, period: str = "2y", pivot_order: int = 5) -> pd.DataFrame:
+
+def build_labeled_dataset(
+    tickers: list,
+    period: str = "2y",
+    pivot_order: int = 5,
+    benchmark_ticker: str = _DEFAULT_BENCHMARK_TICKER,
+) -> pd.DataFrame:
     """
-    Run pivot/pattern detection and labeling for every ticker in
-    `tickers`, and combine all the resulting labels into one DataFrame.
+    Run pivot/pattern detection, labeling, and every Stage 4 indicator
+    combination for every ticker in `tickers`, and combine the results
+    into one DataFrame - one row per labeled pattern, features and all.
 
     Tickers that fail to fetch (delisted, too new to have `period` of
     history, a typo, etc.) are skipped with a printed message rather than
     stopping the whole run - a handful of bad tickers out of hundreds
     shouldn't block building the dataset from all the good ones.
 
-    Returns a DataFrame with one row per labeled pattern: ticker,
-    pattern_type, entry_date, entry_price, exit_date, exit_price,
-    exit_reason, return_pct, is_successful. (label_patterns()'s "pattern"
-    object itself is dropped here, since a TrianglePattern/BullFlagPattern
-    doesn't serialize cleanly to a flat file - only its outcome is kept.)
+    Returns a DataFrame with one row per labeled pattern:
+        ticker, pattern_type, entry_date, entry_price, exit_date,
+        exit_price, exit_reason, return_pct, is_successful, plus every
+        indicator combination's feature columns, prefixed with
+        "indicator{N}_" (e.g. combination #1's "is_squeezed" becomes
+        "indicator1_is_squeezed") so all five combinations' columns can
+        sit side by side without colliding.
+    (label_patterns()'s "pattern" object itself is dropped after its
+    features are computed, since a TrianglePattern/BullFlagPattern
+    doesn't serialize cleanly to a flat file.)
     """
+    benchmark_data = fetch_daily_price_history(benchmark_ticker, period=period)
     all_rows = []
 
     for ticker_index, ticker in enumerate(tickers, start=1):
@@ -46,14 +65,9 @@ def build_labeled_dataset(tickers: list, period: str = "2y", pivot_order: int = 
             triangles = deduplicate_triangles(detect_triangles(pivots))
             bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
             labels = label_patterns(price_data, triangles + bull_flags)
-        except Exception as error:
-            print(f"  [{ticker_index}/{len(tickers)}] {ticker}: skipped ({error})")
-            continue
 
-        print(f"  [{ticker_index}/{len(tickers)}] {ticker}: {len(labels)} labeled patterns")
-        for label in labels:
-            all_rows.append(
-                {
+            for label in labels:
+                row = {
                     "ticker": ticker,
                     "pattern_type": label["pattern_type"],
                     "entry_date": label["entry_date"],
@@ -64,7 +78,21 @@ def build_labeled_dataset(tickers: list, period: str = "2y", pivot_order: int = 
                     "return_pct": label["return_pct"],
                     "is_successful": label["is_successful"],
                 }
-            )
+
+                for indicator_number, combination in INDICATOR_COMBINATIONS.items():
+                    compute_features = combination["compute_features"]
+                    if combination.get("needs_benchmark"):
+                        compute_features = functools.partial(compute_features, benchmark_data=benchmark_data)
+                    features = compute_features(price_data, label["pattern"])
+                    for feature_name, feature_value in features.items():
+                        row[f"indicator{indicator_number}_{feature_name}"] = feature_value
+
+                all_rows.append(row)
+        except Exception as error:
+            print(f"  [{ticker_index}/{len(tickers)}] {ticker}: skipped ({error})")
+            continue
+
+        print(f"  [{ticker_index}/{len(tickers)}] {ticker}: {len(labels)} labeled patterns")
 
     return pd.DataFrame(all_rows)
 

@@ -135,12 +135,17 @@ printed above the final summary line.
 
 ### `scripts/build_dataset.py` — Stage 6's training dataset
 
-Runs pivot/pattern detection and labeling across a whole universe of
-tickers (the current S&P 500 constituents by default) instead of just
-one, and saves every labeled pattern to a single CSV - the multi-ticker
-dataset Stage 6's model (and Stage 3's threshold-validation sweep) needs,
+Runs pivot/pattern detection, labeling, and all five Stage 4 indicator
+combinations across a whole universe of tickers (the current S&P 500
+constituents by default) instead of just one, and saves every labeled
+pattern - features and all - to a single CSV: the multi-ticker training
+set Stage 6's model (and Stage 3's threshold-validation sweep) needs,
 since one ticker's history alone isn't enough examples for either to mean
-anything statistically.
+anything statistically. Each indicator combination's columns are
+prefixed `indicator{N}_` (e.g. `indicator1_is_squeezed`) so all five sit
+side by side without colliding. A few `indicator5_relative_strength`
+values come back blank for patterns too early in the fetched window to
+have 63 prior trading days of history - expected, not a bug.
 
 ```
 python -m scripts.build_dataset                          # full S&P 500, ~2y each, saves to data/labeled_patterns.csv
@@ -181,7 +186,7 @@ later doesn't re-download tickers it already has.
 | `src/charting.py` | `plot_chart(price_data, ticker="", pivots=None, patterns=None, price_overlays=None, extra_panels=None, labels=None, save_path=None)` | 5b | Renders an interactive Plotly candlestick + volume chart, one x-axis label per calendar month, with a dashed vertical crosshair on hover spanning every panel. Draws pivot markers if `pivots` is given, triangle/bull-flag overlays if `patterns` is given, price-scale indicator lines if `price_overlays` is given, stacked indicator panels if `extra_panels` is given, and labeled trade lines if `labels` is given. |
 | `main.py` | `run(ticker, pivot_order=5, period="2y", indicator_number=None, label_outcomes=False, save_path=None)` | — | Chains all of the above into one end-to-end run: fetch → pivots → triangles/bull-flags → (optionally) indicator features → (optionally) labeling → plot. `save_path` is forwarded to `plot_chart()`, mainly for scripted callers like `scripts/end_to_end_test.py`. |
 | `scripts/end_to_end_test.py` | `run_smoke_test(ticker="AAPL", benchmark_ticker="SPY")` | — | Runs the full pipeline through every indicator combination and labeling, and reports PASS/FAIL per check. See above. |
-| `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5)` | 6 | Runs detection + labeling across a list of tickers and combines every labeled pattern into one DataFrame, skipping tickers that fail to fetch. See above. |
+| `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY")` | 6 | Runs detection + labeling + all 5 indicator combinations across a list of tickers and combines every labeled pattern (with features) into one DataFrame, skipping tickers that fail to fetch. See above. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,

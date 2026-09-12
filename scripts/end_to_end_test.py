@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import main
+from scripts.build_dataset import build_labeled_dataset
 from scripts.fetch_real_data import fetch_daily_price_history
 from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
@@ -113,6 +114,22 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
     except Exception as error:
         print(f"    exception: {error}")
         check("chart renders with labeled outcomes", False)
+
+    print("\n--- Stage 6: multi-ticker dataset + feature matrix ---")
+    try:
+        dataset = build_labeled_dataset([ticker], period="2y")
+        expected_indicator_columns = {f"indicator{n}_" for n in INDICATOR_COMBINATIONS}
+        has_indicator_columns = all(
+            any(column.startswith(prefix) for column in dataset.columns) for prefix in expected_indicator_columns
+        )
+        check(
+            f"build_labeled_dataset produces a feature matrix ({len(dataset)} rows, "
+            f"{len(dataset.columns)} columns, all 5 indicator prefixes present)",
+            len(dataset) > 0 and has_indicator_columns,
+        )
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("build_labeled_dataset produces a feature matrix", False)
 
     print("\n" + ("ALL CHECKS PASSED" if all_passed else "SOME CHECKS FAILED"))
     return all_passed

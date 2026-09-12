@@ -297,12 +297,45 @@ Plus swing-trading-specific features:
     `exit_reason == "target"`, matching PLAN.md's original Stage 5
     wording) - mean return is a second, complementary lens, not a
     replacement.
-  - This dataset only has Stage 3's raw pattern detection and Stage 5's
-    labels - it does not yet have Stage 4's indicator features attached
-    per pattern, which the model will need as its input. Building that
-    feature matrix (running all 5 indicator combinations for every
-    pattern and joining the results to this dataset) is the next step
-    before any model code.
+  - **Stage 4's indicator features are now attached to every pattern.**
+    `build_labeled_dataset()` runs all five `INDICATOR_COMBINATIONS`
+    against each pattern (reusing the exact same functions `main.py
+    --indicator N` uses) and joins their output onto that pattern's row,
+    with each combination's columns prefixed `indicator{N}_` (e.g.
+    combination #1's `is_squeezed` becomes `indicator1_is_squeezed`) so
+    all five combinations' columns can sit side by side without name
+    collisions.
+    - A handful of `indicator5_relative_strength` values come back `NaN`
+      for patterns occurring very early in the fetched window - that
+      combination needs 63 prior trading days to compute a return
+      comparison, which a pattern from a stock's first ~3 months of
+      fetched history doesn't have yet. Expected, not a bug; a model
+      will need to either drop those rows or impute them.
+    - The full-universe run with all five combinations attached produced
+      `data/labeled_patterns.csv` at 1,833 rows x 37 columns (the original
+      10 labeling/identifying columns plus 27 indicator feature columns
+      across the five combinations' `indicator{N}_` prefixes).
+  - **A substantive, unexpected finding: more confirmation signals firing
+    correlates with *worse* outcomes, not better.** Grouping every pattern
+    by `confirmation_count` (how many of the 12 boolean indicator flags
+    fired at all, 0-12) shows mean return falling in an almost straight
+    line as that count rises - from +2.5% at count=1 down to -1.6% at
+    count=9+ (correlation -0.16). Nearly all 12 individual flags show the
+    same direction on their own (True performs worse than False), not
+    just the combined count. Published as a dedicated artifact, "The
+    Confirmation Paradox" (see `SUMMARIES.md`), with the leading
+    explanation being that these signals are lagging relative to the
+    fixed +10%/-5%/20-day exit rule - by the time several confirm
+    together, a meaningful chunk of the move has often already happened,
+    leaving less of the fixed target's room ahead and more of the fixed
+    stop's room behind. This is read as an argument against a hand-tuned
+    rule-based confirmation score (one of PLAN.md's open questions below)
+    and for building the actual model next, since a model can weigh - and
+    if needed invert - these signals instead of assuming more agreement
+    is better.
+    Actual model code (logistic regression or gradient boosting, with
+    walk-forward validation) is the next step now that the feature
+    matrix exists.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage
@@ -378,3 +411,11 @@ Pattern-Detection/
 - How much of the ML step is worth it vs. a simpler rule-based scoring
   system (e.g. weighted sum of the 5 indicator combos) — worth prototyping
   the simple version first before investing in a full model.
+  - **Partially answered by the Confirmation Paradox finding above (Stage
+    6):** a naive weighted-sum score built from these 12 flags would rank
+    the *worst*-performing patterns as the most confirmed, since more
+    flags firing together correlates with worse outcomes under the
+    current exit rule. That doesn't rule out rule-based scoring entirely
+    (a score with negative or nonlinear weights could still work), but it
+    rules out the simplest version of it, and is itself evidence for
+    trying the model rather than assuming a hand-tuned score first.

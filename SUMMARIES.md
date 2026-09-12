@@ -7,4 +7,5 @@ instead of only living in Claude's artifact gallery.
 | Summary | Covers | Link |
 |---|---|---|
 | Signal & Ledger | Stage 4 (five confirmation indicators) and Stage 5 (labeling) — the economic mechanism behind each signal and the real AAPL trade ledger, including the case where the best-confirmed pattern still lost. | https://claude.ai/code/artifact/b56ae841-17db-4ba1-927a-a670238e1d64 |
-| S&P 500 Breakout Scan | Stage 6's raw multi-ticker dataset — sortable/searchable per-ticker win rates across all 503 S&P 500 constituents (2,273 labeled patterns), plus a win-rate distribution histogram. | https://claude.ai/code/artifact/406c52de-4e05-4953-8d23-b34a6ed53845 |
+| S&P 500 Breakout Scan | Stage 6's raw multi-ticker dataset — sortable/searchable per-ticker win rates and mean returns across all 503 S&P 500 constituents (1,833 labeled patterns), plus a win-rate distribution histogram. | https://claude.ai/code/artifact/406c52de-4e05-4953-8d23-b34a6ed53845 |
+| The Confirmation Paradox | Stage 6's indicator-impact analysis — across all 1,833 labeled patterns, more of Stage 4's confirmation signals firing correlates with *worse* outcomes, not better; what that means for the fixed exit rule and for building a model instead of a hand-tuned score. | https://claude.ai/code/artifact/f7f2c5fc-b30d-46ff-ad8b-9c6d3217036e |
