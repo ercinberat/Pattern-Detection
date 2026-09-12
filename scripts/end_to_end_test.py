@@ -211,6 +211,39 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
         print(f"    exception: {error}")
         check("build_breakout_dataset produces a feature matrix", False)
 
+    print("\n--- Stage 6: model training + walk-forward validation ---")
+    try:
+        from src.model import load_training_data, train_and_evaluate
+
+        # A single ticker rarely has enough patterns for even one
+        # walk-forward fold - use a batch of well-known, liquid tickers
+        # instead, purely to exercise the real training code path. Needs
+        # to be a big enough batch that every fold sees at least one
+        # winning and one losing pattern - a training fold with only one
+        # outcome present can't fit a logistic regression at all, which a
+        # much smaller sample (e.g. 10 tickers) can hit by bad luck.
+        sample_tickers = [
+            "AAPL", "MSFT", "AMZN", "GOOGL", "TSLA", "JPM", "XOM", "UNH", "V", "PG",
+            "JNJ", "HD", "BAC", "KO", "DIS", "NFLX", "INTC", "CSCO", "PEP", "MRK",
+            "ABBV", "CVX", "WMT", "ADBE", "CRM", "NKE", "MCD", "COST", "T", "VZ",
+        ]
+        model_dataset = build_breakout_dataset(sample_tickers, period="2y")
+
+        temp_csv = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+        temp_csv.close()
+        model_dataset.to_csv(temp_csv.name, index=False)
+
+        features, target, entry_dates = load_training_data(temp_csv.name)
+        fold_results = train_and_evaluate(features, target, n_splits=2)
+        check(
+            f"model trains and validates across walk-forward folds ({len(features)} patterns, "
+            f"{len(fold_results)} folds)",
+            len(fold_results) == 2 and {"roc_auc", "baseline_win_rate"} <= set(fold_results.columns),
+        )
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("model trains and validates across walk-forward folds", False)
+
     print("\n" + ("ALL CHECKS PASSED" if all_passed else "SOME CHECKS FAILED"))
     return all_passed
 

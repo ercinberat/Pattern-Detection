@@ -18,7 +18,8 @@ pip install -r requirements.txt
 Current dependencies: `yfinance` (pulling price data), `pandas` (data
 handling), `plotly` (interactive charting), `scipy` (trendline regression
 fits for triangle detection), `requests` (fetching the S&P 500 ticker
-list), `lxml` (parsing that list's HTML table).
+list), `lxml` (parsing that list's HTML table), `scikit-learn` (Stage 6's
+model - logistic regression, standardization, walk-forward splitting).
 
 ---
 
@@ -220,6 +221,41 @@ falling back to `end_date` for just those rows - mixing two different
 evaluation rules into one dataset would reintroduce the exact timing
 problem this script exists to avoid.
 
+Its feature-timing search uses the exact same `direction="up",
+require_full_candle=True` settings as `label_pattern_outcome()`'s own
+entry trigger, so a row's features are always read as of the same day
+its trade actually enters on - an earlier version used a looser,
+different search for features than for entry, which disagreed on 22% of
+rows (see `PLAN.md`'s Stage 6 notes).
+
+### `src/model.py` — Stage 6's first model
+
+A logistic regression predicting whether a pattern's breakout will hit
+its target before its stop, trained on
+`data/breakout_labeled_patterns.csv`'s indicator features. Picked over
+gradient boosting as the first model because its learned weights can be
+read directly afterward (printed at the end of a run) rather than staying
+a black box. Validated with 5 chronological walk-forward folds
+(`sklearn.TimeSeriesSplit`) - each fold is tested only on trades that
+happen after everything its own training data covers, never a random
+split.
+
+```
+python -m src.model
+```
+
+Prints, per fold: how many patterns were in the training/test split, the
+test fold's actual win rate (the baseline to beat), the win rate among
+patterns the model called "will succeed," the win rate among just the
+20% of patterns it was most confident about, and the standard
+accuracy/precision/recall/ROC-AUC metrics - then the full model's
+learned weight for every feature, fit on all the data at once.
+
+Patterns missing a feature value (mostly
+`indicator5_relative_strength`, which needs 63 prior trading days of
+history) are dropped rather than filled in, as the simplest first pass -
+see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
+
 ---
 
 ## What each piece does
@@ -251,6 +287,9 @@ problem this script exists to avoid.
 | `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY")` | 6 | Runs detection + labeling + all 5 indicator combinations across a list of tickers and combines every labeled pattern (with features) into one DataFrame, skipping tickers that fail to fetch. See above. |
 | `scripts/measure_indicator_lag.py` | `measure_indicator_lag(tickers, period="2y", benchmark_ticker="SPY", max_search_days=20)` | 3/6 | Recomputes every indicator combination's confirmation flags at both a pattern's `end_date` and its real breakout day, for every labeled pattern across a list of tickers. See above. |
 | `scripts/build_breakout_dataset.py` | `build_breakout_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY", max_search_days=20)` | 6 | Like `build_labeled_dataset()`, but every indicator combination's features are computed at each pattern's real breakout day instead of `end_date`/`flag_end_date`; patterns with no breakout found are dropped. See above. |
+| `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv")` | 6 | Loads the training dataset, keeps only scale-independent feature columns plus pattern type, drops rows missing a feature, sorts by `entry_date`. See above. |
+| `src/model.py` | `train_and_evaluate(features, target, n_splits=5)` | 6 | Trains/tests a logistic regression across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
+| `src/model.py` | `print_feature_weights(features, target)` | 6 | Fits one logistic regression on all the data and prints every feature's learned weight, standardized so they're comparable to each other. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,

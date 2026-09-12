@@ -98,7 +98,20 @@ def build_breakout_dataset(
         for label in labels:
             pattern = label["pattern"]
 
-            breakout = find_breakout_date(price_data, pattern, max_search_days=max_search_days)
+            # direction="up", require_full_candle=True - must match
+            # label_pattern_outcome()'s own search exactly (see
+            # src/labeling.py), or this row's features get computed as of
+            # a different day than the one the trade actually enters on.
+            # An earlier version of this script searched either direction
+            # with a close-only check, which could - and on 22% of rows,
+            # did - find an earlier, different breakout than the real
+            # entry trigger, silently reintroducing the exact "features
+            # read too early" problem this dataset exists to fix (see
+            # PLAN.md's Stage 6 notes for a real case on ABT: a 16-day
+            # gap between the two).
+            breakout = find_breakout_date(
+                price_data, pattern, max_search_days=max_search_days, direction="up", require_full_candle=True
+            )
             if breakout is None:
                 dropped_no_breakout += 1
                 continue

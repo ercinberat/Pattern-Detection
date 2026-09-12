@@ -471,8 +471,16 @@ Plus swing-trading-specific features:
 - Use walk-forward validation (never a random train/test split on time
   series data) to avoid leaking future information.
 - **Status:** the multi-ticker data pipeline this needed is built and has
-  been run (`scripts/build_dataset.py`); the model itself is not started
-  yet.
+  been run (`scripts/build_dataset.py`); a first model exists
+  (`src/model.py`) - see its results near the end of this section.
+  - **Current numbers (after all of Stage 3/5's fixes documented above):**
+    1,241 labeled patterns across 482 of 503 tickers, 25.0% win rate,
+    +0.8% mean return - see `data/labeled_patterns.csv` and the
+    "S&P 500 Breakout Scan" artifact (`SUMMARIES.md`). The narrative
+    below (1,833 patterns, 22.3% win rate) is the history of how this
+    dataset got built, kept as a record of what was found and fixed
+    along the way, not the current numbers - regenerate with
+    `python -m scripts.build_dataset` to reproduce today's figures.
   - Scanned all 503 current S&P 500 constituents, 2 years of daily data
     each: 1,833 labeled patterns saved to `data/labeled_patterns.csv`
     (gitignored - regenerate with `python -m scripts.build_dataset`).
@@ -565,6 +573,53 @@ Plus swing-trading-specific features:
     (Stage 3's notes above), not `data/labeled_patterns.csv`, since the
     breakout-day features are the more accurate reading of the same
     trades.
+  - **First model built: `src/model.py`, a logistic regression** (the
+    simpler of the two options above, picked first since its weights can
+    be read directly - see the module's own docstring) on 20
+    scale-independent features (excludes 7 raw price/volume-level columns
+    like `indicator3_close`/`indicator3_obv`/`indicator4_atr`, which
+    aren't comparable across tickers at very different price levels)
+    plus pattern type, validated with 5 chronological
+    (`sklearn.TimeSeriesSplit`) walk-forward folds - never a random
+    split, so no fold is ever trained on trades that happen after the
+    ones it's tested on.
+    - **Before training, found and fixed one more real bug:**
+      `build_breakout_dataset.py` computed its indicator features using
+      a *different*, looser breakout search (either direction, close
+      only) than the *stricter* one `label_pattern_outcome()` actually
+      uses to trigger entry (`direction="up",
+      require_full_candle=True`). On 22% of rows, these two searches
+      disagreed - e.g. ABT's features were read on 2025-09-02, 16 days
+      before its trade actually entered on 2025-09-18 - silently
+      reintroducing the exact "features read too early" problem this
+      dataset was built to fix. Both searches now use the same
+      parameters; `data/breakout_labeled_patterns.csv` was regenerated
+      (still 1,241 patterns - only which day each row's features are
+      read from changed, not which patterns qualify).
+    - **First result (1,173 of 1,241 patterns had complete features - 68
+      dropped for a missing feature, mostly `relative_strength`):**
+      mean ROC-AUC 0.554 across the 5 folds (0.5 = a coin flip; ranged
+      0.427 to 0.624 fold to fold - real signal, but inconsistent over
+      time, not a strong or stable edge). The most practically useful
+      reading: the 20% of patterns the model was most confident about
+      won 33.3% of the time, against a 27.1% baseline across the same
+      folds (+6.2pp, consistent in 4 of 5 folds).
+    - **The feature weights don't resolve the Confirmation Paradox
+      theme - they continue it.** Several individually "bullish-looking"
+      signals push toward *lower* predicted success:
+      `is_bullish_direction` (-0.240), high RSI (-0.227),
+      `is_obv_new_high` (-0.210), `is_near_52_week_high` (-0.161). Others
+      push positive: `is_momentum_shift` (+0.257), wider (i.e.
+      *not* squeezed) Bollinger bands (+0.257), `plus_di` (+0.203),
+      `relative_strength` (+0.187), a MACD bullish flip (+0.168). Not a
+      simple "more confirmation is good/bad" story either way - a
+      genuinely mixed picture, which is itself the argument for a model
+      over a hand-tuned score: no simple rule captures this.
+    - **Next steps, not yet done:** gradient boosting (XGBoost/LightGBM)
+      as the natural second model to compare against this baseline;
+      imputing `indicator5_relative_strength` instead of dropping those
+      68 rows; and Stage 7's backtesting to translate "this model's
+      probability score" into an actual position-taking strategy.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage
