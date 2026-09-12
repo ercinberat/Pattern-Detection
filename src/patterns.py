@@ -7,7 +7,7 @@ building blocks for fitting triangle trendlines and finding bull flag
 pole+consolidation setups, as described in PLAN.md.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 from scipy.stats import linregress
@@ -119,6 +119,98 @@ def pattern_evaluation_date(pattern) -> pd.Timestamp:
         return pattern.end_date
     if isinstance(pattern, BullFlagPattern):
         return pattern.flag_end_date
+    raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
+
+
+def find_breakout_date(price_data: pd.DataFrame, pattern, max_search_days: int = 20):
+    """
+    Find the first bar where price actually breaks the pattern's
+    geometry - the real breakout/breakdown candle, as opposed to
+    end_date/flag_end_date, which is just the last bar of whichever
+    overlapping detection window happened to be kept and can land several
+    days away from the real move (see PLAN.md's Stage 3 notes for a real
+    example on EXPE, where the window's end_date landed 3 trading days
+    after a +17.6% earnings gap).
+
+    A triangle's own fitted trendlines (high_slope/high_intercept and
+    low_slope/low_intercept) already describe the exact line a breakout
+    has to cross, so "breaking" means Close moving outside those lines.
+    The search covers the triangle's own window (start_date onward) as
+    well as max_search_days past end_date, not just the days after
+    end_date - a real breakout can happen *inside* a window whose
+    end_date got pushed past it (exactly what happened on EXPE: the
+    window that won deduplicate_triangles()'s tie-break still contained
+    the actual gap day, because the fresh pivots created by that gap
+    hadn't been confirmed yet - see find_pivots()). A bull flag's box is
+    stored directly (flag_high/flag_low) and, by construction, can't be
+    broken during its own flag_start_date-to-flag_end_date window (Close
+    can never exceed flag_high, the max High seen during exactly that
+    window), so its search only needs to start after flag_end_date.
+
+    price_data: DataFrame with a Close column, e.g. fetch_daily_price_history()'s
+        output. Must be the same price series the pattern was detected on,
+        so bar positions/dates line up with the trendlines' own fit.
+    pattern: a TrianglePattern or BullFlagPattern (see above for how each
+        one's "break" is defined).
+    max_search_days: how many bars past the pattern's own end date to keep
+        looking before giving up. Matches labeling.py's default
+        max_holding_days, since a breakout that hasn't happened within a
+        trade's own holding window isn't useful to compare against.
+
+    Returns a dict {"breakout_date": pd.Timestamp, "direction": "up" or
+    "down"} for the first bar that breaks the pattern's geometry, or None
+    if no breakout happens within the search range (the pattern just
+    stayed inside its own lines/box for the whole window and search
+    period).
+    """
+    evaluation_date = pattern_evaluation_date(pattern)
+    evaluation_position = price_data.index.get_loc(evaluation_date)
+    search_end_position = evaluation_position + max_search_days
+
+    if isinstance(pattern, TrianglePattern):
+        # Start from the window's own first bar, not just after end_date -
+        # see the docstring above for why a real break can fall inside a
+        # window whose end_date has drifted past it.
+        start_position = price_data.index.get_loc(pattern.start_date)
+        search_dates = price_data.index[start_position : search_end_position + 1]
+        for date in search_dates:
+            bar_position = price_data.index.get_loc(date)
+            upper_line = pattern.high_slope * bar_position + pattern.high_intercept
+            lower_line = pattern.low_slope * bar_position + pattern.low_intercept
+            close = price_data["Close"].loc[date]
+            if close > upper_line:
+                return {"breakout_date": date, "direction": "up"}
+            if close < lower_line:
+                return {"breakout_date": date, "direction": "down"}
+        return None
+
+    if isinstance(pattern, BullFlagPattern):
+        search_dates = price_data.index[evaluation_position + 1 : search_end_position + 1]
+        for date in search_dates:
+            if price_data["Close"].loc[date] > pattern.flag_high:
+                return {"breakout_date": date, "direction": "up"}
+        return None
+
+    raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
+
+
+def pattern_as_of_breakout(pattern, breakout_date: pd.Timestamp):
+    """
+    Return a copy of `pattern` with its evaluation date (end_date for a
+    triangle, flag_end_date for a bull flag) moved to breakout_date.
+
+    This is the piece that lets find_breakout_date() plug straight into
+    the existing Stage 4 indicator functions and Stage 5 labeling without
+    changing either: they all read a pattern's evaluation date via
+    pattern_evaluation_date(pattern), so a copy with that one field
+    swapped is enough to make them look at "the real breakout day" instead
+    of "the detection window's last bar", with every other field
+    (trendlines, flag box, etc.) left exactly as detected.
+    """
+    if isinstance(pattern, TrianglePattern):
+        return replace(pattern, end_date=breakout_date)
+    if isinstance(pattern, BullFlagPattern):
+        return replace(pattern, flag_end_date=breakout_date)
     raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
 
 

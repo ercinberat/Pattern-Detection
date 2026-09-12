@@ -79,6 +79,84 @@ The project has three layers:
   This only becomes meaningful with enough labeled examples across enough
   tickers/time to see a real pattern in the outcomes - tuning against one
   ticker's last couple of years would just be curve-fitting noise.
+- **Known limitation found via live usage (EXPE, descending triangle
+  ending 2025-11-10):** a triangle's `end_date` is just
+  `window_slice.index[-1]` - the last bar of whichever overlapping 40-day
+  window `deduplicate_triangles()` kept - not the bar where price actually
+  broke the trendline. On EXPE, the real move was a +17.6% overnight gap
+  on 2025-11-07 (an earnings jump, not a genuine triangle breakdown); the
+  three overlapping candidate windows ending 11-10/11-11/11-12 all had
+  identical trendline fit (combined r² 1.997) because `find_pivots()`
+  hadn't yet confirmed any swing pivot from after the gap (it needs 5
+  bars either side), so the fit was unchanged across all three end dates
+  and `deduplicate_triangles()`'s `max()` tie-break arbitrarily kept the
+  earliest one (11-10). Since Stage 5 enters at the Open right after
+  `end_date`, this pattern's entry landed on 11-11 - 3 trading days and
+  ~4% higher than the actual gap - for reasons unrelated to signal
+  quality. This is exactly the kind of case the planned
+  "earnings-date proximity" feature (Stage 4's swing-trading-specific
+  features, not started yet) and an N-day close-through confirmation
+  could help catch or filter out; worth considering when picking which of
+  those to build first, and worth keeping in mind that `end_date`/entry
+  timing can lag the real trigger by several days, especially right after
+  a gap.
+  - **Built as a reusable measure, not just a one-off finding:**
+    `find_breakout_date(price_data, pattern, max_search_days=20)`
+    (`src/patterns.py`) finds the first bar where price actually crosses
+    a triangle's own fitted trendlines (extrapolated past the window they
+    were fit on) or a bull flag's own box (`flag_high`) - searching the
+    triangle's whole detection window as well as the days after
+    `end_date`, since (as the EXPE case showed) a real break can fall
+    *inside* a window whose `end_date` drifted past it. Returns
+    `{"breakout_date", "direction"}` or `None` if nothing breaks within
+    the search range. `pattern_as_of_breakout(pattern, breakout_date)`
+    hands back a copy of a pattern with its evaluation date moved to that
+    real breakout day, so it plugs straight into the existing Stage 4
+    indicator functions and Stage 5 labeling without changing either -
+    both read a pattern's evaluation date via `pattern_evaluation_date()`.
+    Covered by `scripts/end_to_end_test.py`'s new Stage 3+ check.
+  - **`scripts/measure_indicator_lag.py` uses both to directly test
+    whether Stage 6's Confirmation Paradox is (partly) a measurement-
+    timing artifact:** for every labeled pattern, it recomputes all 5
+    indicator combinations' confirmation flags both at `end_date` (today's
+    pipeline) and at the real breakout day, and compares
+    `confirmation_count`'s correlation with `return_pct` under each
+    timing. Built to be a standing measure for any current or future
+    indicator, not a one-off check - see the script's own docstring.
+  - **Full S&P 500 run (`python -m scripts.measure_indicator_lag`)
+    confirms the timing hypothesis, at real scale:** 1,734 of 1,833
+    labeled patterns (95%) had a real breakout found within 20 days.
+    Mean lag was -9.1 days (median 0) between `end_date` and the real
+    breakout - on average the "detection window" is already 9 days stale
+    by the time it's read, not just occasionally off by a few days as the
+    EXPE case suggested. Triangle breakout direction was a near coin flip
+    (49% up / 51% down) regardless of a triangle's classified type
+    (symmetrical/ascending/descending), confirming that classification
+    doesn't predict which way it actually breaks.
+    - **`confirmation_count`'s correlation with `return_pct` flips sign**
+      depending on when it's measured: **-0.145** at `end_date` (today's
+      pipeline - this is what "The Confirmation Paradox" artifact
+      reports) vs. **+0.106** measured at the real breakout day. The
+      bucketed mean-return table tells the same story more concretely:
+      at `end_date`, mean return declines almost monotonically from
+      +2.5% (1 signal) to -5.0% (12 signals); at the real breakout day,
+      the highest-confirmation buckets (7-11 signals) instead show some
+      of the *best* returns (+1.5% to +2.6%), clearly better than the
+      lowest buckets (-0.3% to -0.8% at 1-2 signals).
+    - **Reading:** a substantial part of the Confirmation Paradox looks
+      like a measurement-timing artifact, not proof that more
+      confirmation is a bad sign in general - reading the indicators off
+      a stale, already-passed detection window makes an otherwise-decent
+      signal look backwards. This doesn't fully overturn "The
+      Confirmation Paradox" artifact (its numbers, as measured by the
+      pipeline that exists today, are correct), but it does mean that
+      artifact's framing - and the write-up's suggestion that confirmation
+      itself predicts worse outcomes - needs a follow-up caveat or
+      revision once discussed, since the more accurate statement is "the
+      *pipeline's current timing* makes confirmation look bad, but
+      confirmation measured at the right moment looks good." Full
+      row-level results in `data/indicator_lag_measurements.csv`
+      (gitignored - regenerate with `python -m scripts.measure_indicator_lag`).
 
 ### Stage 4 — Confirmation indicators (feature engineering)
 For every detected pattern candidate, compute a feature set drawn from five

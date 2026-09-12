@@ -161,6 +161,32 @@ it takes a while - each ticker's data gets cached (see
 `fetch_daily_price_history`'s `use_cache`), so re-running the script
 later doesn't re-download tickers it already has.
 
+### `scripts/measure_indicator_lag.py` — indicator-timing measurement
+
+Tests whether reading Stage 4's indicators at a pattern's own
+`end_date`/`flag_end_date` (the last bar of its detection window) instead
+of at the real breakout/breakdown candle makes a difference - built after
+a real case (EXPE, see `PLAN.md`'s Stage 3 notes) showed the two can land
+days apart. For every labeled pattern across a universe of tickers, it
+finds the real breakout day (`find_breakout_date()`) and recomputes every
+registered indicator combination's confirmation flags at both dates, so
+`confirmation_count`'s relationship with `return_pct` can be compared
+under each timing. This is a standing measure, not a one-off script - any
+indicator combination added to `INDICATOR_COMBINATIONS` in the future
+gets the same before/after comparison automatically (aside from listing
+its boolean feature names in this script's `_BOOLEAN_FEATURE_NAMES`).
+
+```
+python -m scripts.measure_indicator_lag                              # full S&P 500, ~2y each
+python -m scripts.measure_indicator_lag --limit 20                   # quick test run on the first 20 tickers only
+python -m scripts.measure_indicator_lag --max-search-days 10         # give up looking for a breakout sooner
+python -m scripts.measure_indicator_lag --output data/other.csv      # save somewhere else
+```
+
+Patterns whose geometry never gets broken within `--max-search-days` (default
+20, matching Stage 5's `max_holding_days`) are counted but excluded from
+the comparison, since there's no "at breakout" reading to compare against.
+
 ---
 
 ## What each piece does
@@ -174,6 +200,8 @@ later doesn't re-download tickers it already has.
 | `src/patterns.py` | `deduplicate_triangles(triangles)` | 3 (chart helper) | Collapses overlapping triangle candidates down to the single best-fitting one per cluster, purely to keep charts readable. |
 | `src/patterns.py` | `detect_bull_flags(price_data, pole_lookback=10, ...)` | 3 | Finds a sharp pole move followed by a tight, low-volume flag consolidation. Returns every overlapping candidate, unfiltered. |
 | `src/patterns.py` | `deduplicate_bull_flags(bull_flags)` | 3 (chart helper) | Collapses overlapping bull-flag candidates down to the one with the strongest pole per cluster, purely to keep charts and datasets clean. |
+| `src/patterns.py` | `find_breakout_date(price_data, pattern, max_search_days=20)` | 3 | Finds the first bar where price actually crosses a triangle's trendlines or a bull flag's box, as opposed to `end_date`/`flag_end_date` which is just the detection window's last bar. Returns `{"breakout_date", "direction"}` or `None`. |
+| `src/patterns.py` | `pattern_as_of_breakout(pattern, breakout_date)` | 3 | Returns a copy of a pattern with its evaluation date moved to `breakout_date`, so it plugs into the existing indicator/labeling functions unchanged. |
 | `src/indicators.py` | `compute_bollinger_bands` / `compute_adx_dmi` / `compute_macd` / `compute_donchian_channel` / `compute_obv` / `compute_rsi` / `compute_atr` / `compute_pct_from_52_week_high` / `compute_relative_strength` | 4 | The full-series version of each building block, for charting (each corresponding `*_and_*`/`*_confirmation` feature function below evaluates one of these at a single pattern's end date instead). |
 | `src/indicators.py` | `bollinger_squeeze_and_volume_surge(price_data, pattern, ...)` | 4 | Indicator #1: Bollinger Band squeeze (narrow bands vs. their own recent history) + volume surge. |
 | `src/indicators.py` | `adx_trend_filter_and_macd_flip(price_data, pattern, ...)` | 4 | Indicator #2: ADX/DMI trend filter (real, upward trend) + a recent bullish MACD histogram flip. |
@@ -187,6 +215,7 @@ later doesn't re-download tickers it already has.
 | `main.py` | `run(ticker, pivot_order=5, period="2y", indicator_number=None, label_outcomes=False, save_path=None)` | — | Chains all of the above into one end-to-end run: fetch → pivots → triangles/bull-flags → (optionally) indicator features → (optionally) labeling → plot. `save_path` is forwarded to `plot_chart()`, mainly for scripted callers like `scripts/end_to_end_test.py`. |
 | `scripts/end_to_end_test.py` | `run_smoke_test(ticker="AAPL", benchmark_ticker="SPY")` | — | Runs the full pipeline through every indicator combination and labeling, and reports PASS/FAIL per check. See above. |
 | `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY")` | 6 | Runs detection + labeling + all 5 indicator combinations across a list of tickers and combines every labeled pattern (with features) into one DataFrame, skipping tickers that fail to fetch. See above. |
+| `scripts/measure_indicator_lag.py` | `measure_indicator_lag(tickers, period="2y", benchmark_ticker="SPY", max_search_days=20)` | 3/6 | Recomputes every indicator combination's confirmation flags at both a pattern's `end_date` and its real breakout day, for every labeled pattern across a list of tickers. See above. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,

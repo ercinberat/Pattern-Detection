@@ -19,9 +19,19 @@ import tempfile
 import main
 from scripts.build_dataset import build_labeled_dataset
 from scripts.fetch_real_data import fetch_daily_price_history
+from scripts.measure_indicator_lag import measure_indicator_lag
 from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
-from src.patterns import deduplicate_bull_flags, deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
+from src.patterns import (
+    deduplicate_bull_flags,
+    deduplicate_triangles,
+    detect_bull_flags,
+    detect_triangles,
+    find_breakout_date,
+    find_pivots,
+    pattern_as_of_breakout,
+    pattern_evaluation_date,
+)
 
 
 def _has_nan_value(features: dict) -> bool:
@@ -62,6 +72,30 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
     check(
         f"pattern detection finds at least one pattern ({len(triangles)} triangles, {len(bull_flags)} bull flags)",
         len(patterns) > 0,
+    )
+
+    print("\n--- Stage 3+: real breakout-date detection (find_breakout_date) ---")
+    breakout_detection_ok = True
+    for pattern in patterns:
+        try:
+            breakout = find_breakout_date(price_data, pattern)
+            if breakout is not None:
+                if not ({"breakout_date", "direction"} <= set(breakout.keys()) and breakout["direction"] in ("up", "down")):
+                    breakout_detection_ok = False
+                # pattern_as_of_breakout() should hand back a copy whose
+                # evaluation date is the breakout date, with the original
+                # pattern left untouched - a stale value here would mean
+                # measure_indicator_lag.py is silently comparing a pattern
+                # against itself instead of against its real breakout day.
+                pattern_at_breakout = pattern_as_of_breakout(pattern, breakout["breakout_date"])
+                if pattern_evaluation_date(pattern_at_breakout) != breakout["breakout_date"]:
+                    breakout_detection_ok = False
+        except Exception as error:
+            print(f"    exception: {error}")
+            breakout_detection_ok = False
+    check(
+        f"find_breakout_date/pattern_as_of_breakout run cleanly on every pattern ({len(patterns)} patterns)",
+        breakout_detection_ok,
     )
 
     print("\n--- Stage 4: indicator feature computation ---")
@@ -130,6 +164,19 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
     except Exception as error:
         print(f"    exception: {error}")
         check("build_labeled_dataset produces a feature matrix", False)
+
+    print("\n--- Stage 6: indicator-lag measurement ---")
+    try:
+        measurements = measure_indicator_lag([ticker], period="2y")
+        expected_columns = {"confirmation_count_at_end_date", "confirmation_count_at_breakout", "lag_days"}
+        check(
+            f"measure_indicator_lag compares end_date vs. real-breakout readings ({len(measurements)} patterns "
+            f"had a breakout found)",
+            expected_columns <= set(measurements.columns),
+        )
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("measure_indicator_lag compares end_date vs. real-breakout readings", False)
 
     print("\n" + ("ALL CHECKS PASSED" if all_passed else "SOME CHECKS FAILED"))
     return all_passed
