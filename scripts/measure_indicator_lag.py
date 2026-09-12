@@ -40,6 +40,7 @@ from src.patterns import (
     find_pivots,
     pattern_as_of_breakout,
     pattern_evaluation_date,
+    remove_bull_flags_inside_wedges,
 )
 
 _DEFAULT_BENCHMARK_TICKER = "SPY"
@@ -116,6 +117,10 @@ def measure_indicator_lag(
             pivots = find_pivots(price_data)
             triangles = deduplicate_triangles(detect_triangles(pivots))
             bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
+            # A bull flag fully inside a wedge's date range is just a
+            # smaller piece of the same move the wedge already describes,
+            # not an independent setup.
+            bull_flags = remove_bull_flags_inside_wedges(triangles, bull_flags)
             labels = label_patterns(price_data, triangles + bull_flags)
         except Exception as error:
             print(f"  [{ticker_index}/{len(tickers)}] {ticker}: skipped ({error})")

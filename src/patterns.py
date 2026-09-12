@@ -74,11 +74,22 @@ class TrianglePattern:
     full price series). Storing the fitted equations directly, rather than
     just start/end points, means the exact fitted line can always be
     redrawn or re-evaluated later, at any point along it.
+
+    last_high_pivot_date/last_low_pivot_date are the most recent swing
+    high/swing low pivot each line was actually fit from. A trendline's
+    equation depends on every pivot used to fit it, including ones late
+    in the window - so testing whether price has crossed that line on a
+    date *before* one of its own defining pivots has even happened yet is
+    lookahead bias: the exact line being tested wasn't knowable at that
+    point in time. find_breakout_date() uses these two dates to avoid
+    exactly that (see PLAN.md's Stage 3 notes for a real case on AAPL,
+    where a "breakout" was flagged on a window's very first day using a
+    line whose earliest defining pivot didn't happen until 6 days later).
     """
 
     start_date: pd.Timestamp
     end_date: pd.Timestamp
-    triangle_type: str  # "symmetrical", "ascending", or "descending"
+    triangle_type: str  # "symmetrical", "ascending", "descending", "rising_wedge", or "falling_wedge"
     high_slope: float
     high_intercept: float
     high_r_squared: float
@@ -86,6 +97,8 @@ class TrianglePattern:
     low_intercept: float
     low_r_squared: float
     contraction_pct: float  # how much the high/low trendline gap shrank over the window
+    last_high_pivot_date: pd.Timestamp
+    last_low_pivot_date: pd.Timestamp
 
 
 @dataclass
@@ -122,7 +135,13 @@ def pattern_evaluation_date(pattern) -> pd.Timestamp:
     raise TypeError(f"Unrecognized pattern type: {type(pattern)}")
 
 
-def find_breakout_date(price_data: pd.DataFrame, pattern, max_search_days: int = 20):
+def find_breakout_date(
+    price_data: pd.DataFrame,
+    pattern,
+    max_search_days: int = 20,
+    direction: str = None,
+    require_full_candle: bool = False,
+):
     """
     Find the first bar where price actually breaks the pattern's
     geometry - the real breakout/breakdown candle, as opposed to
@@ -141,11 +160,19 @@ def find_breakout_date(price_data: pd.DataFrame, pattern, max_search_days: int =
     end_date got pushed past it (exactly what happened on EXPE: the
     window that won deduplicate_triangles()'s tie-break still contained
     the actual gap day, because the fresh pivots created by that gap
-    hadn't been confirmed yet - see find_pivots()). A bull flag's box is
-    stored directly (flag_high/flag_low) and, by construction, can't be
-    broken during its own flag_start_date-to-flag_end_date window (Close
-    can never exceed flag_high, the max High seen during exactly that
-    window), so its search only needs to start after flag_end_date.
+    hadn't been confirmed yet - see find_pivots()). Searching inside the
+    window also means a candidate date can come before some of the
+    pivots a line was fit from - checked against
+    last_high_pivot_date/last_low_pivot_date (see TrianglePattern) so a
+    cross is never reported before its own line was actually knowable
+    (a real case on AAPL flagged a "breakout" on a window's first day,
+    using a line whose defining pivots didn't happen until 6 days later -
+    see PLAN.md's Stage 3 notes). A bull flag's box is stored directly
+    (flag_high/flag_low) and, by construction, can't be broken during its
+    own flag_start_date-to-flag_end_date window (Close can never exceed
+    flag_high, the max High seen during exactly that window), so its
+    search only needs to start after flag_end_date - no separate lookahead
+    guard is needed there.
 
     price_data: DataFrame with a Close column, e.g. fetch_daily_price_history()'s
         output. Must be the same price series the pattern was detected on,
@@ -156,12 +183,33 @@ def find_breakout_date(price_data: pd.DataFrame, pattern, max_search_days: int =
         looking before giving up. Matches labeling.py's default
         max_holding_days, since a breakout that hasn't happened within a
         trade's own holding window isn't useful to compare against.
+    direction: None (default) returns the first break in EITHER direction,
+        whichever comes first - the right choice for asking "when did this
+        pattern's own geometry actually get resolved." "up" or "down"
+        instead searches ONLY for a break in that one direction, skipping
+        past any opposite-direction break rather than stopping there - the
+        right choice for asking "if I only care about a long entry, is
+        there a real upward break somewhere in the search range, even if
+        an earlier downward wiggle would otherwise have ended the search."
+        A triangle's low/high trendline can be a rough, overly steep
+        extrapolation (see PLAN.md's Stage 3 notes on TSLA's rising
+        wedge), so an early opposite-direction cross doesn't necessarily
+        mean the real move never happened - just that it happened later.
+    require_full_candle: False (default) checks only the Close price
+        against the line, matching every existing use of this function
+        (the timing-measurement analyses in PLAN.md's Stage 3/6 notes all
+        use this definition, so their published numbers stay reproducible
+        with the default). True instead requires the WHOLE candle to have
+        cleared the line - Low above the upper line for an "up" break,
+        High below the lower line for a "down" break - so a candle that
+        dipped below the line intraday but recovered to close above it
+        doesn't count. Used by labeling.py's entry_trigger="breakout" for
+        a stricter, more conservative entry signal (by explicit request).
 
     Returns a dict {"breakout_date": pd.Timestamp, "direction": "up" or
-    "down"} for the first bar that breaks the pattern's geometry, or None
-    if no breakout happens within the search range (the pattern just
-    stayed inside its own lines/box for the whole window and search
-    period).
+    "down"} for the first bar that breaks the pattern's geometry in the
+    requested direction (or either, if direction is None), or None if
+    that never happens within the search range.
     """
     evaluation_date = pattern_evaluation_date(pattern)
     evaluation_position = price_data.index.get_loc(evaluation_date)
@@ -177,17 +225,37 @@ def find_breakout_date(price_data: pd.DataFrame, pattern, max_search_days: int =
             bar_position = price_data.index.get_loc(date)
             upper_line = pattern.high_slope * bar_position + pattern.high_intercept
             lower_line = pattern.low_slope * bar_position + pattern.low_intercept
-            close = price_data["Close"].loc[date]
-            if close > upper_line:
+            # require_full_candle checks the candle's Low/High (the whole
+            # candle has to clear the line) instead of just Close (a
+            # close-only check still counts a candle that dipped below
+            # the line intraday and recovered by the end of the bar).
+            up_check_price = price_data["Low"].loc[date] if require_full_candle else price_data["Close"].loc[date]
+            down_check_price = price_data["High"].loc[date] if require_full_candle else price_data["Close"].loc[date]
+            # A line's equation isn't knowable until every pivot it was
+            # fit from has actually happened - checking a cross before
+            # that is lookahead bias (see TrianglePattern's docstring for
+            # the real AAPL case this guards against). Gated per line,
+            # independently: the high line's own last pivot gates an "up"
+            # cross, the low line's gates a "down" cross - the other
+            # line's pivots aren't relevant to whether this one's
+            # equation was already knowable.
+            if up_check_price > upper_line and direction != "down" and date >= pattern.last_high_pivot_date:
                 return {"breakout_date": date, "direction": "up"}
-            if close < lower_line:
+            if down_check_price < lower_line and direction != "up" and date >= pattern.last_low_pivot_date:
                 return {"breakout_date": date, "direction": "down"}
         return None
 
     if isinstance(pattern, BullFlagPattern):
+        # Bull flags only ever check the upside (see the docstring above),
+        # so a caller asking for direction="down" can never get a match -
+        # that's a deliberate consequence of what a bull flag is, not a
+        # bug to special-case here.
+        if direction == "down":
+            return None
         search_dates = price_data.index[evaluation_position + 1 : search_end_position + 1]
         for date in search_dates:
-            if price_data["Close"].loc[date] > pattern.flag_high:
+            up_check_price = price_data["Low"].loc[date] if require_full_candle else price_data["Close"].loc[date]
+            if up_check_price > pattern.flag_high:
                 return {"breakout_date": date, "direction": "up"}
         return None
 
@@ -228,19 +296,46 @@ def _fit_trendline(bar_positions, prices):
     return slope, intercept, r_squared
 
 
+# History: min_pivots_per_side was raised from 2 to 3 (requiring 3
+# pivots on BOTH sides) after a real case exposed a problem with 2: two
+# points always fit a straight line perfectly, r²=1.0, regardless of
+# whether the line means anything. EXPE's 2026-04-02 triangle had a "low"
+# trendline fit from exactly 2 swing lows, scoring a trivially perfect
+# r² while sitting 20+ points away from every actual price low in
+# between them (see PLAN.md's Stage 3 notes) - a difference
+# deduplicate_triangles()'s r²-based tie-break can't detect, since it
+# can't tell "genuinely well-supported line" apart from "only had 2
+# points to fit." Requiring 3-on-both turned out to be much stricter
+# than intended (EXPE dropped from 3 triangles detected to 0, AAPL from
+# 4 to 1), so it was relaxed to the current rule below: both sides still
+# need min_pivots_per_side (back to 2), but at least one side must reach
+# min_pivots_one_side (3) - min_pivots_per_side=2 is what's superseded
+# here, not min_pivots_one_side. Note this narrower rule would NOT have
+# rejected the original EXPE case (its high side already had 3 pivots;
+# only the low side had 2) - it guards against BOTH sides being a bare
+# 2-point line, not against one side being one. Kept here, not just in
+# git history, so any of these choices are easy to revisit.
+_SUPERSEDED_MIN_PIVOTS_PER_SIDE = 2
+
+
 def detect_triangles(
     pivots: pd.DataFrame,
     window: int = 40,
     min_pivots_per_side: int = 2,
+    min_pivots_one_side: int = 3,
     min_r_squared: float = 0.6,
     min_contraction_pct: float = 25.0,
     flat_slope_threshold_pct: float = 2.0,
 ) -> list[TrianglePattern]:
     """
     Slide a window across the price data looking for triangle candidates:
-    a trendline fitted to the swing highs that's flat or declining, and a
-    trendline fitted to the swing lows that's flat or rising, with the gap
-    between the two lines shrinking (contracting) over the window.
+    two trendlines (fitted to the swing highs and swing lows) with the gap
+    between them shrinking (contracting) over the window - classified as
+    "symmetrical" (high declining, low rising), "ascending" (high flat,
+    low rising), "descending" (high declining, low flat), "rising_wedge"
+    (both rising, low rising faster), or "falling_wedge" (both declining,
+    high declining faster). A window where the two lines are flat or
+    diverging isn't a triangle candidate at all.
 
     pivots: output of find_pivots() - price_data plus swing_high/swing_low
         columns.
@@ -249,9 +344,18 @@ def detect_triangles(
         window of 40 daily bars is roughly two months, which fits the
         swing-trading holding periods this project targets.
     min_pivots_per_side: a window needs at least this many swing highs AND
-        this many swing lows to attempt a trendline fit - two points
-        already make a line, but a couple more make the fit meaningful
-        rather than just connecting two dots.
+        this many swing lows to attempt a trendline fit at all - kept at
+        the original bare minimum (2) so a real triangle whose flatter
+        side only ever gets tapped twice isn't thrown out entirely.
+        min_pivots_one_side below is the stricter check that actually
+        guards against a degenerate fit.
+    min_pivots_one_side: at least one of the two sides (high or low)
+        needs this many pivots - so a candidate can't have BOTH sides
+        sitting at the bare min_pivots_per_side minimum, which is what
+        let a trivially "perfect" 2-point line through in a real case
+        (see _SUPERSEDED_MIN_PIVOTS_PER_SIDE above and PLAN.md's Stage 3
+        notes). This only guarantees ONE side has real support behind
+        it - the other side can still be a 2-point line.
     min_r_squared: how well each trendline has to fit its swing points
         (0-1) to count as a genuine trendline rather than a scattered set
         of points that happen to have some best-fit slope.
@@ -287,6 +391,8 @@ def detect_triangles(
         swing_lows = window_slice.dropna(subset=["swing_low"])
         if len(swing_highs) < min_pivots_per_side or len(swing_lows) < min_pivots_per_side:
             continue
+        if len(swing_highs) < min_pivots_one_side and len(swing_lows) < min_pivots_one_side:
+            continue  # neither side has more than a bare min_pivots_per_side-point line behind it
 
         high_slope, high_intercept, high_r_squared = _fit_trendline(
             bar_position.loc[swing_highs.index], swing_highs["swing_high"]
@@ -314,8 +420,10 @@ def detect_triangles(
 
         high_is_flat = abs(high_total_move_pct) < flat_slope_threshold_pct
         high_is_declining = high_total_move_pct < -flat_slope_threshold_pct
+        high_is_rising = high_total_move_pct > flat_slope_threshold_pct
         low_is_flat = abs(low_total_move_pct) < flat_slope_threshold_pct
         low_is_rising = low_total_move_pct > flat_slope_threshold_pct
+        low_is_declining = low_total_move_pct < -flat_slope_threshold_pct
 
         if high_is_declining and low_is_rising:
             triangle_type = "symmetrical"
@@ -323,9 +431,22 @@ def detect_triangles(
             triangle_type = "ascending"
         elif high_is_declining and low_is_flat:
             triangle_type = "descending"
+        elif high_is_rising and low_is_rising:
+            # Both sides rising, but the low side has to be rising faster
+            # than the high side for the gap to have contracted at all
+            # (already confirmed above) - a "rising wedge", found on TSLA
+            # (2025-07-16 -> 2025-09-10, see PLAN.md's Stage 3 notes): a
+            # real, valid triangle shape the original three-case
+            # classification silently discarded, since it never
+            # considered both sides sloping the same direction.
+            triangle_type = "rising_wedge"
+        elif high_is_declining and low_is_declining:
+            # Mirror image of rising_wedge - both sides falling, high side
+            # falling faster (again guaranteed by the contraction check
+            # above). A "falling wedge".
+            triangle_type = "falling_wedge"
         else:
-            # Both flat, or sloping the wrong way to be converging (e.g.
-            # highs rising) - not a triangle shape.
+            # Both flat, or diverging - not a converging triangle shape.
             continue
 
         triangles.append(
@@ -340,6 +461,11 @@ def detect_triangles(
                 low_intercept=low_intercept,
                 low_r_squared=low_r_squared,
                 contraction_pct=contraction_pct,
+                # swing_highs/swing_lows are already in chronological order
+                # (subsets of window_slice, which is), so the last entry is
+                # the most recent pivot each line was actually fit from.
+                last_high_pivot_date=swing_highs.index[-1],
+                last_low_pivot_date=swing_lows.index[-1],
             )
         )
 
@@ -497,6 +623,42 @@ def deduplicate_bull_flags(bull_flags: list[BullFlagPattern]) -> list[BullFlagPa
             clusters.append([bull_flag])
 
     return [max(cluster, key=lambda bull_flag: bull_flag.pole_return_pct) for cluster in clusters]
+
+
+def remove_bull_flags_inside_wedges(triangles: list[TrianglePattern], bull_flags: list[BullFlagPattern]) -> list[BullFlagPattern]:
+    """
+    Drop any bull flag whose whole pole-to-flag date range sits inside a
+    detected rising_wedge/falling_wedge - by request, on the reasoning
+    that a wedge is a slower, multi-week contraction, so a bull flag's
+    much shorter pole-and-flag shape (pole_lookback=10 bars, flag_length=7
+    bars by default - a few weeks at most) detected entirely within that
+    same window isn't really an independent setup. It's just a smaller
+    piece of the same underlying move already being described by the
+    wedge, so keeping both would double-count one move as two different
+    (and possibly contradictory - e.g. a bullish flag inside a bearish
+    falling wedge) pattern types.
+
+    Only rising_wedge/falling_wedge triangles count as "a wedge" here -
+    the original symmetrical/ascending/descending triangle types aren't
+    considered, since this was raised specifically about wedges.
+
+    triangles: a list of TrianglePattern, e.g. deduplicate_triangles()'s
+        output - only its rising_wedge/falling_wedge entries are used.
+    bull_flags: a list of BullFlagPattern, e.g. deduplicate_bull_flags()'s
+        output.
+
+    Returns a new list: bull_flags with any pattern fully inside a wedge's
+    date range removed. Doesn't modify triangles or bull_flags in place.
+    """
+    wedges = [triangle for triangle in triangles if triangle.triangle_type in ("rising_wedge", "falling_wedge")]
+
+    def is_inside_a_wedge(bull_flag: BullFlagPattern) -> bool:
+        return any(
+            wedge.start_date <= bull_flag.pole_start_date and bull_flag.flag_end_date <= wedge.end_date
+            for wedge in wedges
+        )
+
+    return [bull_flag for bull_flag in bull_flags if not is_inside_a_wedge(bull_flag)]
 
 
 if __name__ == "__main__":

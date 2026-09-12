@@ -157,6 +157,68 @@ The project has three layers:
       confirmation measured at the right moment looks good." Full
       row-level results in `data/indicator_lag_measurements.csv`
       (gitignored - regenerate with `python -m scripts.measure_indicator_lag`).
+  - **`scripts/build_breakout_dataset.py` turns this into an actual
+    training dataset for Stage 6's model:** it's `build_dataset.py`,
+    with one change - every indicator combination's features are
+    computed at each pattern's real breakout day
+    (`pattern_as_of_breakout()`) instead of at `end_date`/`flag_end_date`.
+    The label itself (`entry_date`, `return_pct`, `is_successful`) is
+    untouched - only which day the *features* are read from changes. The
+    ~5% of patterns with no breakout found within 20 days are dropped
+    entirely rather than falling back to `end_date` for just those, so
+    the dataset doesn't quietly mix two different evaluation rules.
+    Output columns match `build_labeled_dataset()`'s plus `end_date`,
+    `breakout_date`, `breakout_direction`, and `lag_days` for reference.
+    Saves to `data/breakout_labeled_patterns.csv` (gitignored - regenerate
+    with `python -m scripts.build_breakout_dataset`). Covered by
+    `scripts/end_to_end_test.py`.
+  - **Bug found by inspecting a chart, not by a metric:** looking at
+    EXPE's `2026-04-02` triangle (10% winner) directly, the drawn "low"
+    trendline visibly didn't track price at all - it just connected the
+    window's only 2 swing lows (2026-02-23 and 2026-04-02), 40 bars apart.
+    A 2-point line is *always* a perfect fit (r²=1.000) by definition,
+    regardless of whether it means anything - checked directly, actual
+    daily Lows sat 20-25+ points *above* that line for most of the
+    window (e.g. 229.5 actual vs. 207.1 fitted on 2026-03-20).
+    `deduplicate_triangles()`'s tie-break (highest combined r² wins) has
+    no way to tell that apart from a genuinely well-supported line, so it
+    can systematically favor trivial 2-point fits over better-supported
+    ones with more points but a lower (yet more meaningful) r².
+    - **First fix tried (superseded):** `detect_triangles()`'s
+      `min_pivots_per_side` default raised from 2 to 3 on *both* sides.
+      This did remove the degenerate case, but measured impact was much
+      larger than intended - EXPE dropped to **0** triangles detected
+      (was 3), AAPL's smoke-test run from 4 to 1. Too strict to keep.
+    - **Current fix:** `min_pivots_per_side` reverted to 2 (both sides
+      still need at least this many pivots to attempt a fit at all), plus
+      a new, narrower requirement - `min_pivots_one_side` (3) - at least
+      ONE of the two sides must reach 3 pivots, so a candidate can no
+      longer have BOTH sides sitting at the bare 2-point minimum. Both
+      values and the full history are documented in
+      `_SUPERSEDED_MIN_PIVOTS_PER_SIDE`'s comment right above
+      `detect_triangles()` in `src/patterns.py`, so reverting either
+      choice doesn't require digging through git history.
+    - **Important limit of this compromise:** it would *not* have
+      rejected the original EXPE case - its high side already had 3
+      pivots, only the low side had 2, and the rule only requires one
+      side to clear 3. It guards against both sides being degenerate at
+      once, not against one side being. EXPE's `2026-04-02` triangle is
+      back in the detected set under this rule (confirmed directly) -
+      counted as an accepted trade-off for now, not an oversight.
+    - **Measured impact of the current fix:** EXPE back to 3 triangles
+      (matching the pre-fix count); AAPL still only 1 (not back to 4) -
+      its other 3 original triangles apparently had *both* sides under 3
+      pivots, so they stay filtered out. Neither `min_pivots_per_side`
+      nor `min_pivots_one_side` has been validated against real outcomes
+      (see this stage's "Next" note above) - these are fixes for a
+      specific, verified defect, not tuned values.
+    - [ ] **`data/labeled_patterns.csv`, `data/breakout_labeled_patterns.csv`,
+      and `data/indicator_lag_measurements.csv` were all built before this
+      fix** and reflect the old, degenerate-fit-prone triangle detection.
+      Regenerate all three (`build_dataset.py`, `build_breakout_dataset.py`,
+      `measure_indicator_lag.py`) before training Stage 6's model on them,
+      or the model would be trained on triangles this fix would no longer
+      detect.
 
 ### Stage 4 — Confirmation indicators (feature engineering)
 For every detected pattern candidate, compute a feature set drawn from five
@@ -237,19 +299,105 @@ Plus swing-trading-specific features:
 - Needs careful definition to avoid lookahead bias and to reflect a
   realistic swing-trade exit rule (e.g. target/stop/time-based exit).
 - **Status:** done (`src/labeling.py`). `label_pattern_outcome(price_data,
-  pattern, target_pct=10.0, stop_pct=5.0, max_holding_days=20)` labels one
-  pattern using a fixed target/stop/time exit rule - the option chosen
-  from this stage's exit-rule open question below, kept simplest to
-  validate against first. Entry is the Open of the bar right after the
-  pattern's end date, so the label only ever looks at price data strictly
-  after the pattern's own detection point (avoiding lookahead bias). If
-  a bar's range covers both the stop and target, the stop is assumed hit
-  first (the conservative assumption, since daily bars don't say which
-  was actually touched first within the day). `label_patterns()` runs
-  this over a list of patterns, skipping ones too close to the end of the
-  data to label yet. Wired into `main.py --label`, which prints a
+  pattern, target_pct=10.0, stop_pct=5.0, max_holding_days=20,
+  entry_trigger="breakout", breakout_search_days=20)` labels one pattern
+  using a fixed target/stop/time exit rule - the option chosen from this
+  stage's exit-rule open question below, kept simplest to validate
+  against first. If a bar's range covers both the stop and target, the
+  stop is assumed hit first (the conservative assumption, since daily
+  bars don't say which was actually touched first within the day).
+  `label_patterns()` runs this over a list of patterns, skipping ones
+  with no valid entry. Wired into `main.py --label`, which prints a
   win-rate summary and draws each labeled trade on the chart (dotted line
   from entry to exit, green/red/grey for target/stop/time).
+  - **Entry rule changed from `end_date`-triggered to breakout-triggered.**
+    Originally, entry was the Open of the bar right after the pattern's
+    own `end_date`/`flag_end_date`, regardless of whether or where price
+    actually broke out. Now, by explicit request, entry is the Open of
+    the bar right after price actually crosses the pattern's upper
+    trendline (triangles) or clears `flag_high` (bull flags) - found via
+    `find_breakout_date()`. The old rule is kept, not deleted: pass
+    `entry_trigger="end_date"` to get it back exactly (see
+    `_SUPERSEDED_ENTRY_TRIGGER` in `src/labeling.py`).
+    - **This is a bigger change than it looks - about half of all
+      triangles now get no label at all.** "Right Signal, Wrong Day"
+      measured triangle breakout direction as a near coin flip (49%
+      up / 51% down, see this file's Stage 3 notes). A downward break
+      isn't a valid entry under this rule (there's no short-selling in
+      this project), so `label_pattern_outcome()` correctly returns
+      `None` for those rather than faking a long entry into a
+      breakdown - but it means roughly half of previously-labeled
+      triangles simply disappear from every dataset that uses the new
+      default, not just shift dates slightly.
+    - [ ] **All three Stage 6 datasets
+      (`data/labeled_patterns.csv`, `data/breakout_labeled_patterns.csv`,
+      `data/indicator_lag_measurements.csv`) were built under the old
+      `end_date`-triggered rule** (and, for the first two, before this
+      stage's triangle-detection threshold changes too - see Stage 3).
+      All three need regenerating before Stage 6's model is trained.
+    - **Refined further: an early downward cross no longer disqualifies a
+      pattern.** `find_breakout_date()` gained a `direction` parameter
+      (`None` searches either direction and stops at the first cross,
+      the original behavior, still used by the timing-measurement
+      analyses above; `"up"`/`"down"` search only that direction,
+      skipping past any opposite-direction cross instead of stopping
+      there). `label_pattern_outcome()`'s `"breakout"` entry_trigger now
+      calls it with `direction="up"` specifically. This matters because a
+      triangle's trendline (especially a wedge's - see this file's
+      rising_wedge/falling_wedge notes just above) can be an overly steep
+      extrapolation that an ordinary pullback crosses before the real
+      move happens: TSLA's first rising_wedge (2024-09-12 -> 2024-11-06)
+      technically crossed its own extrapolated low line downward on
+      2024-10-22 (an ordinary ~2% pullback against a support line
+      extrapolated from a steep +28% earlier rise), 2 days before a real
+      +21.9% earnings gap on 10-24 and a further rally to 288.53 by
+      11-06. Under the direction-blind search this pattern got no label
+      at all; searching specifically for "up" finds the real 11-06 break
+      and labels it correctly (entered 11-07, target hit, +10%).
+    - **Fixed a real lookahead-bias bug the whole-window search opened
+      up.** Searching from a triangle's own start_date (added for the
+      EXPE case above) means a candidate date can come *before* some of
+      the pivots a line was fit from - and a line's equation depends on
+      every pivot used to fit it, so testing a cross before all of those
+      pivots have actually happened tests against a line that wasn't
+      knowable yet. Caught on AAPL: a `rising_wedge` (2026-06-02 ->
+      2026-07-29) had its "breakout" flagged on 2026-06-02 - the
+      window's very first day - but every pivot the trendlines were fit
+      from happened later (earliest: 2026-06-08, six days after; latest:
+      2026-07-29). The resulting (fabricated) trade entered 2026-06-03,
+      stopped out -5% by 2026-06-09 - a signal no real trader could have
+      acted on, since the line it was tested against wouldn't exist for
+      another six days.
+      - **Fix:** `TrianglePattern` gained `last_high_pivot_date`/
+        `last_low_pivot_date` (the most recent swing high/low pivot each
+        line was actually fit from, set in `detect_triangles()`).
+        `find_breakout_date()` now only accepts an "up" cross on or after
+        `last_high_pivot_date`, and a "down" cross on or after
+        `last_low_pivot_date` - gated independently per line, since the
+        other line's pivots aren't relevant to whether *this* one's
+        equation was already knowable.
+      - **Verified both ways:** EXPE's Nov 7 gap is unaffected (both of
+        that triangle's defining pivots - 10-29 and 11-05 - predate the
+        7th, so it was never lookahead-biased to begin with). AAPL's
+        wedge now correctly finds no valid "up" entry at all within the
+        search window (the only real cross is a "down" break on 07-31,
+        two days after `end_date`) - no trade, rather than a fabricated
+        one.
+    - **Entry now requires the full candle above the line, not just the
+      Close.** `find_breakout_date()` gained `require_full_candle`
+      (default `False`, preserving the Close-only definition every
+      existing timing-measurement analysis above already used).
+      `label_pattern_outcome()`'s `"breakout"` entry_trigger passes
+      `require_full_candle=True`: the candle's Low (not just its Close)
+      has to clear the upper trendline/`flag_high`, so a candle that
+      dipped below the line intraday and merely recovered by the close
+      doesn't count - a stricter, more conservative entry confirmation,
+      by explicit request. Verified against a real case: AAPL's
+      descending triangle (2025-05-02 -> 2025-06-30) entry shifted from
+      2025-06-23 to 2025-06-25 once the full candle, not just its Close,
+      had to clear the line. EXPE's Nov 7 gap is unaffected either way -
+      the whole candle gapped far enough above the line that Low and
+      Close both clear it identically.
 - ATR-based and trailing-stop exit rules were discussed and deliberately
   left for later (see Open Questions) rather than building all three now.
 
@@ -413,7 +561,10 @@ Plus swing-trading-specific features:
     is better.
     Actual model code (logistic regression or gradient boosting, with
     walk-forward validation) is the next step now that the feature
-    matrix exists.
+    matrix exists - trained on `data/breakout_labeled_patterns.csv`
+    (Stage 3's notes above), not `data/labeled_patterns.csv`, since the
+    breakout-day features are the more accurate reading of the same
+    trades.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage

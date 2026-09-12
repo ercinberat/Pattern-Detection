@@ -15,7 +15,20 @@ still listed as options to add later.
 
 import pandas as pd
 
-from src.patterns import BullFlagPattern, TrianglePattern, pattern_evaluation_date
+from src.patterns import BullFlagPattern, TrianglePattern, find_breakout_date, pattern_evaluation_date
+
+# History: entry_trigger's default used to be (and only ever was)
+# "end_date" - enter right after the pattern's own end_date/flag_end_date,
+# regardless of whether or where price actually broke out. Changed to
+# "breakout" (enter right after price actually crosses the pattern's
+# upper trendline/box) once find_breakout_date() existed to find that day
+# directly - "Right Signal, Wrong Day" and "Same Trades, Better Features"
+# (see PLAN.md's Stage 6 notes) had already shown end_date is often a
+# stale read of a pattern that broke out days earlier or later. "end_date"
+# is kept as an explicit, working entry_trigger option (not deleted) so
+# the original labeling rule stays reproducible for comparison - pass
+# entry_trigger="end_date" to get it back.
+_SUPERSEDED_ENTRY_TRIGGER = "end_date"
 
 
 def label_pattern_outcome(
@@ -24,19 +37,44 @@ def label_pattern_outcome(
     target_pct: float = 10.0,
     stop_pct: float = 5.0,
     max_holding_days: int = 20,
+    entry_trigger: str = "breakout",
+    breakout_search_days: int = 20,
 ) -> dict:
     """
     Label whether a detected pattern's breakout followed through with a
     real move or failed, using a fixed target/stop/time-based exit rule.
 
-    The entry is assumed to happen at the Open of the bar right AFTER the
-    pattern's end date - not on the pattern's own end-date bar, since
-    that bar's own Close is part of what the pattern detection is based
-    on, so it isn't realistic to assume a trade could be entered before
-    that bar has even finished. This also means the label only ever looks
-    at price data strictly after the pattern's end date, never at data
-    the detection itself already used - avoiding the lookahead bias
-    PLAN.md's Stage 5 description calls out.
+    entry_trigger picks what event starts the trade:
+        "breakout" (default): enter at the Open of the bar right after
+            the WHOLE candle (Low included, not just Close) clears the
+            pattern's upper trendline (triangles) or its flag_high (bull
+            flags) - found by find_breakout_date(price_data, pattern,
+            direction="up", require_full_candle=True). Requiring the full
+            candle is a stricter, more conservative confirmation than a
+            close-only cross: a candle that dipped below the line
+            intraday but recovered to close above it doesn't count. Only
+            an upward break counts as a valid entry signal, but an
+            earlier downward cross doesn't disqualify the pattern by
+            itself - direction="up" searches specifically for the first
+            upward break, skipping past any opposite-direction wiggle
+            along the way, since a triangle's trendlines (especially a
+            wedge's - see PLAN.md's Stage 3 notes) can be a rough, overly
+            steep extrapolation that an early, ordinary pullback crosses
+            before the real move happens. A pattern that never breaks
+            upward within breakout_search_days has no valid entry and
+            this returns None for it.
+        "end_date" (superseded - see _SUPERSEDED_ENTRY_TRIGGER above):
+            enter at the Open of the bar right after the pattern's own
+            end_date/flag_end_date, regardless of whether or where price
+            actually broke out. This was the original rule; kept
+            available for comparison, not because it's still recommended.
+    Either way, entry never happens on the triggering bar itself - not on
+    end_date, and not on the breakout candle - since that bar's own Close
+    is part of what triggered the signal, so it isn't realistic to assume
+    a trade could be entered before that bar has even finished. This
+    means the label only ever looks at price data strictly after the
+    triggering bar, never at data the trigger itself already used -
+    avoiding the lookahead bias PLAN.md's Stage 5 description calls out.
 
     target_pct: how far price has to rise (as a % of the entry price) to
         count as the target being hit - a successful breakout.
@@ -44,7 +82,12 @@ def label_pattern_outcome(
         the trade is considered stopped out - a failed breakout.
     max_holding_days: the maximum number of bars to hold the trade before
         giving up and exiting at whatever price is then (a time-based
-        exit), if neither the target nor the stop was hit first.
+        exit), if neither the target nor the stop was hit first. Counted
+        from entry_date, whichever entry_trigger produced it.
+    breakout_search_days: only used when entry_trigger="breakout" - how
+        many bars past end_date to keep looking for a real upward
+        breakout before giving up on this pattern. Passed straight
+        through to find_breakout_date().
 
     Returns a dict:
         entry_date, entry_price: when and at what price the trade starts.
@@ -58,14 +101,36 @@ def label_pattern_outcome(
             happens to be up a little, but never reached the target, is
             not counted as a success under this definition.
 
-    Returns None if there isn't at least one bar of price data after the
-    pattern's end date to label against yet (e.g. the pattern's end date
-    is the most recent bar in price_data).
+    Returns None if there's no valid entry trigger for this pattern (see
+    entry_trigger above), or if there isn't at least one bar of price
+    data after the trigger to label against yet (e.g. the trigger is the
+    most recent bar in price_data).
     """
-    evaluation_date = pattern_evaluation_date(pattern)
-    end_date_position = price_data.index.get_loc(evaluation_date)
+    if entry_trigger == "breakout":
+        # direction="up" specifically, not the default (either direction):
+        # an early downward cross doesn't necessarily mean the pattern
+        # never had a real upward breakout, only that a (possibly overly
+        # steep - see PLAN.md's Stage 3 notes on wedge slopes) extrapolated
+        # line got crossed first. Searching for "up" directly skips past
+        # any such downward wiggle instead of stopping the search there.
+        # require_full_candle=True: the whole candle (Low included) has
+        # to clear the trendline, not just its Close - a stricter, more
+        # conservative confirmation than a close-only cross, by explicit
+        # request.
+        breakout = find_breakout_date(
+            price_data, pattern, max_search_days=breakout_search_days, direction="up", require_full_candle=True
+        )
+        if breakout is None:
+            return None
+        trigger_date = breakout["breakout_date"]
+    elif entry_trigger == "end_date":
+        trigger_date = pattern_evaluation_date(pattern)
+    else:
+        raise ValueError(f"Unrecognized entry_trigger: {entry_trigger!r} (expected 'breakout' or 'end_date')")
 
-    entry_position = end_date_position + 1
+    trigger_position = price_data.index.get_loc(trigger_date)
+
+    entry_position = trigger_position + 1
     if entry_position >= len(price_data):
         return None
 
@@ -114,7 +179,8 @@ def label_patterns(price_data: pd.DataFrame, patterns: list, **label_kwargs) -> 
     history after it yet.
 
     **label_kwargs are passed straight through to label_pattern_outcome()
-    (target_pct, stop_pct, max_holding_days).
+    (target_pct, stop_pct, max_holding_days, entry_trigger,
+    breakout_search_days).
 
     Returns a list of dicts, each label_pattern_outcome() result plus:
         pattern: the TrianglePattern/BullFlagPattern the label came from.

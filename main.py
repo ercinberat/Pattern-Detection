@@ -36,6 +36,7 @@ from src.patterns import (
     detect_bull_flags,
     detect_triangles,
     find_pivots,
+    remove_bull_flags_inside_wedges,
 )
 
 # Combination #5 needs a second ticker's data to compare against; SPY (an
@@ -79,6 +80,11 @@ def run(
     # chart doesn't turn into a hairball of near-duplicate trendlines/flags.
     triangles = deduplicate_triangles(detect_triangles(pivots))
     bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
+    # A bull flag fully inside a wedge's date range is just a smaller
+    # piece of the same move the wedge already describes, not an
+    # independent setup - drop it rather than double-count one move as
+    # two different pattern types.
+    bull_flags = remove_bull_flags_inside_wedges(triangles, bull_flags)
     patterns = triangles + bull_flags
 
     price_overlays = None

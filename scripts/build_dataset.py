@@ -21,7 +21,14 @@ import pandas as pd
 from scripts.fetch_real_data import fetch_daily_price_history, fetch_sp500_tickers
 from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
-from src.patterns import deduplicate_bull_flags, deduplicate_triangles, detect_bull_flags, detect_triangles, find_pivots
+from src.patterns import (
+    deduplicate_bull_flags,
+    deduplicate_triangles,
+    detect_bull_flags,
+    detect_triangles,
+    find_pivots,
+    remove_bull_flags_inside_wedges,
+)
 
 # Combination #5 needs a second ticker's data to compare against; SPY (an
 # S&P 500 ETF) is used as a general-market benchmark, same as main.py.
@@ -64,6 +71,10 @@ def build_labeled_dataset(
             pivots = find_pivots(price_data, order=pivot_order)
             triangles = deduplicate_triangles(detect_triangles(pivots))
             bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
+            # A bull flag fully inside a wedge's date range is just a
+            # smaller piece of the same move the wedge already describes,
+            # not an independent setup.
+            bull_flags = remove_bull_flags_inside_wedges(triangles, bull_flags)
             labels = label_patterns(price_data, triangles + bull_flags)
 
             for label in labels:

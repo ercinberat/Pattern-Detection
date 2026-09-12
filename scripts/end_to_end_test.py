@@ -17,6 +17,7 @@ import sys
 import tempfile
 
 import main
+from scripts.build_breakout_dataset import build_breakout_dataset
 from scripts.build_dataset import build_labeled_dataset
 from scripts.fetch_real_data import fetch_daily_price_history
 from scripts.measure_indicator_lag import measure_indicator_lag
@@ -31,6 +32,7 @@ from src.patterns import (
     find_pivots,
     pattern_as_of_breakout,
     pattern_evaluation_date,
+    remove_bull_flags_inside_wedges,
 )
 
 
@@ -68,10 +70,22 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
 
     triangles = deduplicate_triangles(detect_triangles(pivots))
     bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
+    bull_flags = remove_bull_flags_inside_wedges(triangles, bull_flags)
     patterns = triangles + bull_flags
     check(
         f"pattern detection finds at least one pattern ({len(triangles)} triangles, {len(bull_flags)} bull flags)",
         len(patterns) > 0,
+    )
+
+    wedges = [t for t in triangles if t.triangle_type in ("rising_wedge", "falling_wedge")]
+    no_bull_flag_inside_a_wedge = not any(
+        wedge.start_date <= bull_flag.pole_start_date and bull_flag.flag_end_date <= wedge.end_date
+        for bull_flag in bull_flags
+        for wedge in wedges
+    )
+    check(
+        f"remove_bull_flags_inside_wedges leaves no bull flag fully inside a wedge ({len(wedges)} wedges detected)",
+        no_bull_flag_inside_a_wedge,
     )
 
     print("\n--- Stage 3+: real breakout-date detection (find_breakout_date) ---")
@@ -177,6 +191,25 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
     except Exception as error:
         print(f"    exception: {error}")
         check("measure_indicator_lag compares end_date vs. real-breakout readings", False)
+
+    print("\n--- Stage 6: breakout-day feature matrix ---")
+    try:
+        breakout_dataset = build_breakout_dataset([ticker], period="2y")
+        expected_indicator_columns = {f"indicator{n}_" for n in INDICATOR_COMBINATIONS}
+        has_indicator_columns = all(
+            any(column.startswith(prefix) for column in breakout_dataset.columns) for prefix in expected_indicator_columns
+        )
+        expected_other_columns = {"breakout_date", "breakout_direction", "lag_days"}
+        check(
+            f"build_breakout_dataset produces a feature matrix read at the real breakout day "
+            f"({len(breakout_dataset)} rows, {len(breakout_dataset.columns)} columns)",
+            len(breakout_dataset) > 0
+            and has_indicator_columns
+            and expected_other_columns <= set(breakout_dataset.columns),
+        )
+    except Exception as error:
+        print(f"    exception: {error}")
+        check("build_breakout_dataset produces a feature matrix", False)
 
     print("\n" + ("ALL CHECKS PASSED" if all_passed else "SOME CHECKS FAILED"))
     return all_passed

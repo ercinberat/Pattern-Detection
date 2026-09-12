@@ -136,6 +136,42 @@ def _bull_flag_line_traces(price_data: pd.DataFrame, bull_flag: BullFlagPattern)
     ]
 
 
+def _breakout_marker_traces(price_data: pd.DataFrame, breakout_markers: list):
+    """
+    Build a star marker at each real breakout date (src/patterns.py's
+    find_breakout_date() output) - so a pattern's own end_date-based
+    trendlines/box (drawn in purple/green above) can be visually compared
+    against the day price actually crossed them, which can land days
+    away (see PLAN.md's Stage 3 notes on the EXPE case that motivated
+    this).
+
+    breakout_markers: list of dicts, each {"date": pd.Timestamp,
+        "direction": "up"/"down", "lag_days": int (breakout_date minus
+        end_date, in calendar days)} - e.g. built by combining
+        find_breakout_date()'s output with pattern_evaluation_date() for
+        each pattern.
+    """
+    dates = [marker["date"] for marker in breakout_markers]
+    prices = [price_data["Close"].loc[date] for date in dates]
+    hover_texts = [
+        f"Real breakout: {marker['date'].date()} ({marker['direction']})<br>"
+        f"{abs(marker['lag_days'])} days {'before' if marker['lag_days'] < 0 else 'after'} end_date"
+        for marker in breakout_markers
+    ]
+    return [
+        go.Scatter(
+            x=dates,
+            y=prices,
+            mode="markers",
+            marker=dict(symbol="star", size=14, color="#ffa726", line=dict(color="black", width=1)),
+            name="Real breakout",
+            showlegend=False,
+            text=hover_texts,
+            hovertemplate="%{text}<extra></extra>",
+        )
+    ]
+
+
 # Exit reason -> color, shared between the entry-to-exit line and the
 # exit marker, so a label's outcome is visually obvious at a glance:
 # green for a target hit, red for a stop-out, grey for timing out.
@@ -174,6 +210,7 @@ def plot_chart(
     price_overlays=None,
     extra_panels=None,
     labels=None,
+    breakout_markers=None,
     save_path: str = None,
 ):
     """
@@ -223,6 +260,10 @@ def plot_chart(
         each drawn as a dotted line from the entry to the exit price/date,
         colored green for a target hit, red for a stop-out, or grey for a
         time-based exit.
+    breakout_markers: optional list of dicts (see _breakout_marker_traces()
+        above) - each drawn as an amber star at the real breakout date
+        found by find_breakout_date(), so it can be compared visually
+        against a pattern's own end_date-based lines/box.
     save_path: if given, saves the chart permanently to this HTML file
         path (e.g. for building up a folder of chart snapshots). If not
         given, the chart is saved to a temporary HTML file and opened
@@ -328,6 +369,10 @@ def plot_chart(
         for label in labels:
             for trace in _label_traces(label):
                 fig.add_trace(trace, row=1, col=1)
+
+    if breakout_markers:
+        for trace in _breakout_marker_traces(price_data, breakout_markers):
+            fig.add_trace(trace, row=1, col=1)
 
     # Volume panel: color each bar the same up/down color as its candle.
     volume_colors = [
