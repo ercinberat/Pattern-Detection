@@ -615,11 +615,46 @@ Plus swing-trading-specific features:
       simple "more confirmation is good/bad" story either way - a
       genuinely mixed picture, which is itself the argument for a model
       over a hand-tuned score: no simple rule captures this.
-    - **Next steps, not yet done:** gradient boosting (XGBoost/LightGBM)
-      as the natural second model to compare against this baseline;
-      imputing `indicator5_relative_strength` instead of dropping those
-      68 rows; and Stage 7's backtesting to translate "this model's
-      probability score" into an actual position-taking strategy.
+    - **Gradient boosting added as a second model** -
+      `build_gradient_boosting_model()`/`build_logistic_regression_model()`
+      in `src/model.py`, both trained through the same
+      `train_and_evaluate()` walk-forward loop via a `build_model`
+      parameter, so they're compared on identical folds. Uses
+      scikit-learn's own `GradientBoostingClassifier` rather than
+      XGBoost/LightGBM (PLAN.md's named examples) - same underlying
+      technique, without adding a second heavy dependency for a
+      first comparison run.
+      - **Overall performance is essentially tied, not better:** mean
+        ROC-AUC 0.543 (gradient boosting) vs. 0.554 (logistic
+        regression) - the more flexible model isn't finding extra signal
+        this dataset doesn't already have.
+      - **But the feature importances tell a genuinely different story
+        than the logistic regression weights, and this is the real
+        finding:** gradient boosting puts 96% of its total importance on
+        just 9 continuous/ratio features (`band_width_pct`,
+        `volume_ratio`, `relative_strength`, ADX, `plus_di`/`minus_di`,
+        `pct_from_52_week_high`, RSI, `band_width_percentile`) and
+        essentially ignores all 12 boolean confirmation flags combined
+        (2.8% of importance total) - the exact flags "The Confirmation
+        Paradox" was built around. Logistic regression, on the same
+        data, gave real weight to several of those same booleans
+        (`is_bullish_direction`, `is_momentum_shift`, `was_basing`,
+        others). Read together, this suggests a real hypothesis worth
+        testing later: the *raw magnitude* of these indicators may carry
+        more signal than whether they cross Stage 4's specific
+        hand-picked True/False thresholds - the thresholding itself
+        might be throwing away information, not just measuring it at
+        the wrong time (Stage 3's finding) or in a mixed direction
+        (this stage's logistic-regression finding).
+    - **Next steps, not yet done:** imputing
+      `indicator5_relative_strength` instead of dropping those 68 rows;
+      trying real XGBoost/LightGBM now that scikit-learn's version shows
+      gradient boosting is at least worth pursuing further; testing the
+      "continuous features carry more signal than the booleans"
+      hypothesis directly (e.g. a model using only the continuous
+      features, no boolean flags at all); and Stage 7's backtesting to
+      translate "this model's probability score" into an actual
+      position-taking strategy.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage

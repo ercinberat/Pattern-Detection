@@ -4,15 +4,24 @@ follow through (hit its +10% target before its -5% stop, within 20
 trading days - see src/labeling.py) using the Stage 4 indicator features
 read at the pattern's real breakout day (scripts/build_breakout_dataset.py).
 
-Kept deliberately simple, per PLAN.md's own instruction: a logistic
-regression (not gradient boosting) is trained here first. Logistic
-regression is a well-understood statistical method that scores each
-pattern with a probability of success by fitting a weight to each
-feature - "how much does a squeeze, or a high RSI, push the odds of
-success up or down" - and its weights can be read directly afterward,
-which matters for a project meant to be understood by a non-software-
-engineer reader, not just a software one. Gradient boosting
-(XGBoost/LightGBM) is a natural next step once this baseline exists.
+Kept deliberately simple, per PLAN.md's own instruction: logistic
+regression was built first. It's a well-understood statistical method
+that scores each pattern with a probability of success by fitting a
+weight to each feature - "how much does a squeeze, or a high RSI, push
+the odds of success up or down" - and its weights can be read directly
+afterward, which matters for a project meant to be understood by a
+non-software-engineer reader, not just a software one.
+
+Gradient boosting is now also trained, as a second, more flexible model
+to compare against that baseline. It builds many small decision trees in
+sequence, each one focused on correcting the previous trees' mistakes,
+so - unlike logistic regression - it can pick up on interactions between
+features (e.g. "signal A only matters when signal B is also true")
+without those interactions being written in by hand. This uses
+scikit-learn's own GradientBoostingClassifier rather than XGBoost or
+LightGBM (the two PLAN.md names as examples) - it's the same underlying
+technique, and avoids adding a second, heavier dependency purely to
+train a first comparison model with the same, already-small dataset.
 
 Validated with walk-forward splits, never a random train/test split:
 patterns are sorted by entry_date and split into chronological folds, so
@@ -24,6 +33,7 @@ next month's trades to predict this month's would be cheating).
 """
 
 import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
@@ -104,10 +114,42 @@ def load_training_data(csv_path: str = "data/breakout_labeled_patterns.csv"):
     return features, target, entry_dates
 
 
-def train_and_evaluate(features: pd.DataFrame, target: pd.Series, n_splits: int = 5) -> pd.DataFrame:
+def build_logistic_regression_model() -> Pipeline:
     """
-    Train and test a logistic regression across n_splits walk-forward
-    folds, and return one row of results per fold.
+    A logistic regression, preceded by StandardScaler (rescales every
+    feature to the same rough range - mean 0, spread 1 - before fitting).
+    Without that rescaling, a feature like ADX (0-100) would dominate the
+    fit purely because its numbers are bigger than, say,
+    relative_strength's (usually close to 1.0), not because it actually
+    matters more. Tree-based models like build_gradient_boosting_model()
+    below don't need this - see its own docstring for why.
+    """
+    return Pipeline([("scale", StandardScaler()), ("logistic_regression", LogisticRegression())])
+
+
+def build_gradient_boosting_model() -> GradientBoostingClassifier:
+    """
+    A gradient boosting classifier - see this module's own docstring for
+    what that means and why it's being tried as a second model.
+    random_state is fixed so a run's results don't change from one run to
+    the next just by chance. Doesn't need StandardScaler first: a
+    decision tree splits each feature at a threshold ("is ADX above
+    27.4?"), and where exactly that threshold lands doesn't depend on
+    what scale the feature's numbers happen to be in.
+    """
+    return GradientBoostingClassifier(random_state=0)
+
+
+def train_and_evaluate(features: pd.DataFrame, target: pd.Series, n_splits: int = 5, build_model=build_logistic_regression_model) -> pd.DataFrame:
+    """
+    Train and test a model across n_splits walk-forward folds, and return
+    one row of results per fold.
+
+    build_model: a no-argument function returning a fresh, untrained
+        scikit-learn model each time it's called - build_logistic_regression_model
+        (the default) or build_gradient_boosting_model above. A fresh
+        model is built for every fold rather than reusing one instance,
+        so nothing from an earlier fold's fit can leak into the next.
 
     features/target must already be sorted by entry_date (see
     load_training_data()) - TimeSeriesSplit cuts the data into n_splits+1
@@ -136,13 +178,6 @@ def train_and_evaluate(features: pd.DataFrame, target: pd.Series, n_splits: int 
             means the model is no better than a coin flip, 1.0 means it
             perfectly separates winners from losers.
     """
-    # StandardScaler rescales every feature to the same rough range
-    # (mean 0, spread 1) before fitting - without it, a feature like ADX
-    # (0-100) would dominate the fit purely because its numbers are
-    # bigger than, say, relative_strength's (usually close to 1.0), not
-    # because it actually matters more.
-    model_pipeline = Pipeline([("scale", StandardScaler()), ("logistic_regression", LogisticRegression())])
-
     splitter = TimeSeriesSplit(n_splits=n_splits)
     fold_results = []
 
@@ -150,8 +185,9 @@ def train_and_evaluate(features: pd.DataFrame, target: pd.Series, n_splits: int 
         train_features, test_features = features.iloc[train_positions], features.iloc[test_positions]
         train_target, test_target = target.iloc[train_positions], target.iloc[test_positions]
 
-        model_pipeline.fit(train_features, train_target)
-        predicted_probabilities = model_pipeline.predict_proba(test_features)[:, 1]
+        model = build_model()
+        model.fit(train_features, train_target)
+        predicted_probabilities = model.predict_proba(test_features)[:, 1]
         predicted_labels = predicted_probabilities >= 0.5
 
         # The top 20% most-confident predictions, regardless of whether
@@ -191,11 +227,11 @@ def print_feature_weights(features: pd.DataFrame, target: pd.Series) -> None:
     of success up as it increases (for a True/False feature: up when the
     feature is True); a negative weight pushes it down. Weights are
     comparable to each other here because features were standardized
-    first (see train_and_evaluate()'s StandardScaler note) - without
+    first (see build_logistic_regression_model()'s docstring) - without
     that, a bigger weight could just mean "this feature's raw numbers are
     smaller," not "this feature matters more."
     """
-    model_pipeline = Pipeline([("scale", StandardScaler()), ("logistic_regression", LogisticRegression())])
+    model_pipeline = build_logistic_regression_model()
     model_pipeline.fit(features, target)
 
     weights = pd.Series(
@@ -203,17 +239,37 @@ def print_feature_weights(features: pd.DataFrame, target: pd.Series) -> None:
         index=features.columns,
     ).sort_values()
 
-    print("Feature weights (fit on all data, standardized - positive pushes toward 'successful'):")
+    print("Logistic regression feature weights (fit on all data, standardized - positive pushes toward 'successful'):")
     print(weights.to_string(float_format="{:+.3f}".format))
 
 
-if __name__ == "__main__":
-    features, target, entry_dates = load_training_data()
-    print(f"Loaded {len(features)} patterns with complete features, {entry_dates.min().date()} to {entry_dates.max().date()}")
-    print(f"Overall win rate: {target.mean():.1%}\n")
+def print_feature_importances(features: pd.DataFrame, target: pd.Series) -> None:
+    """
+    Fit one gradient boosting model on the FULL dataset (not a single
+    fold) and print each feature's importance - how much that feature
+    reduced prediction error, summed across every tree split that used
+    it. Unlike logistic regression's weights, importances don't have a
+    direction (there's no equivalent of "positive" or "negative" here,
+    since a tree can use a feature differently at different splits) and
+    they're always zero or positive, and add up to 1.0 across all
+    features - a feature with importance 0.15 accounted for 15% of the
+    model's total error reduction.
+    """
+    gradient_boosting_model = build_gradient_boosting_model()
+    gradient_boosting_model.fit(features, target)
 
-    fold_results = train_and_evaluate(features, target)
-    print("Walk-forward validation (5 chronological folds):")
+    importances = pd.Series(
+        gradient_boosting_model.feature_importances_,
+        index=features.columns,
+    ).sort_values(ascending=False)
+
+    print("Gradient boosting feature importances (fit on all data, sum to 1.0):")
+    print(importances.to_string(float_format="{:.3f}".format))
+
+
+def _print_fold_results(model_name: str, fold_results: pd.DataFrame) -> None:
+    """Print one model's per-fold results table plus its across-fold averages, in a consistent format."""
+    print(f"--- {model_name}: walk-forward validation ({len(fold_results)} chronological folds) ---")
     print(
         fold_results.to_string(
             index=False,
@@ -228,13 +284,30 @@ if __name__ == "__main__":
             },
         )
     )
-
     print(
-        f"\nAveraged across folds: baseline win rate {fold_results['baseline_win_rate'].mean():.1%}, "
+        f"Averaged across folds: baseline win rate {fold_results['baseline_win_rate'].mean():.1%}, "
         f"model win rate (predicted positive) {fold_results['model_win_rate_if_predicted_positive'].mean():.1%}, "
         f"top-20%-confidence win rate {fold_results['top_20pct_win_rate'].mean():.1%}, "
-        f"mean ROC-AUC {fold_results['roc_auc'].mean():.3f}"
+        f"mean ROC-AUC {fold_results['roc_auc'].mean():.3f}\n"
     )
 
-    print()
+
+if __name__ == "__main__":
+    features, target, entry_dates = load_training_data()
+    print(f"Loaded {len(features)} patterns with complete features, {entry_dates.min().date()} to {entry_dates.max().date()}")
+    print(f"Overall win rate: {target.mean():.1%}\n")
+
+    logistic_regression_results = train_and_evaluate(features, target, build_model=build_logistic_regression_model)
+    _print_fold_results("Logistic regression", logistic_regression_results)
+
+    gradient_boosting_results = train_and_evaluate(features, target, build_model=build_gradient_boosting_model)
+    _print_fold_results("Gradient boosting", gradient_boosting_results)
+
+    print(
+        f"Mean ROC-AUC comparison: logistic regression {logistic_regression_results['roc_auc'].mean():.3f} "
+        f"vs. gradient boosting {gradient_boosting_results['roc_auc'].mean():.3f}\n"
+    )
+
     print_feature_weights(features, target)
+    print()
+    print_feature_importances(features, target)

@@ -228,28 +228,35 @@ its trade actually enters on - an earlier version used a looser,
 different search for features than for entry, which disagreed on 22% of
 rows (see `PLAN.md`'s Stage 6 notes).
 
-### `src/model.py` — Stage 6's first model
+### `src/model.py` — Stage 6's models
 
-A logistic regression predicting whether a pattern's breakout will hit
-its target before its stop, trained on
-`data/breakout_labeled_patterns.csv`'s indicator features. Picked over
-gradient boosting as the first model because its learned weights can be
-read directly afterward (printed at the end of a run) rather than staying
-a black box. Validated with 5 chronological walk-forward folds
-(`sklearn.TimeSeriesSplit`) - each fold is tested only on trades that
-happen after everything its own training data covers, never a random
-split.
+Two models predicting whether a pattern's breakout will hit its target
+before its stop, trained on `data/breakout_labeled_patterns.csv`'s
+indicator features and compared side by side: a logistic regression
+(picked first because its learned weights can be read directly, rather
+than staying a black box) and a gradient boosting classifier (picked
+second as a more flexible model that can pick up on interactions between
+features). Both run through the same walk-forward validation - 5
+chronological folds (`sklearn.TimeSeriesSplit`) - each fold tested only
+on trades that happen after everything its own training data covers,
+never a random split.
 
 ```
 python -m src.model
 ```
 
-Prints, per fold: how many patterns were in the training/test split, the
-test fold's actual win rate (the baseline to beat), the win rate among
-patterns the model called "will succeed," the win rate among just the
-20% of patterns it was most confident about, and the standard
-accuracy/precision/recall/ROC-AUC metrics - then the full model's
-learned weight for every feature, fit on all the data at once.
+Prints, per model, per fold: how many patterns were in the training/test
+split, the test fold's actual win rate (the baseline to beat), the win
+rate among patterns the model called "will succeed," the win rate among
+just the 20% of patterns it was most confident about, and the standard
+accuracy/precision/recall/ROC-AUC metrics - then each model's own view of
+which features mattered, fit on all the data at once: logistic
+regression's learned weight per feature (which direction, and how much,
+each one pushes the prediction), and gradient boosting's feature
+importances (how much each feature reduced prediction error, with no
+direction - see `PLAN.md`'s Stage 6 notes for why these two views
+disagree sharply on which features matter, a real finding in its own
+right).
 
 Patterns missing a feature value (mostly
 `indicator5_relative_strength`, which needs 63 prior trading days of
@@ -288,8 +295,9 @@ see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
 | `scripts/measure_indicator_lag.py` | `measure_indicator_lag(tickers, period="2y", benchmark_ticker="SPY", max_search_days=20)` | 3/6 | Recomputes every indicator combination's confirmation flags at both a pattern's `end_date` and its real breakout day, for every labeled pattern across a list of tickers. See above. |
 | `scripts/build_breakout_dataset.py` | `build_breakout_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY", max_search_days=20)` | 6 | Like `build_labeled_dataset()`, but every indicator combination's features are computed at each pattern's real breakout day instead of `end_date`/`flag_end_date`; patterns with no breakout found are dropped. See above. |
 | `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv")` | 6 | Loads the training dataset, keeps only scale-independent feature columns plus pattern type, drops rows missing a feature, sorts by `entry_date`. See above. |
-| `src/model.py` | `train_and_evaluate(features, target, n_splits=5)` | 6 | Trains/tests a logistic regression across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
-| `src/model.py` | `print_feature_weights(features, target)` | 6 | Fits one logistic regression on all the data and prints every feature's learned weight, standardized so they're comparable to each other. |
+| `src/model.py` | `train_and_evaluate(features, target, n_splits=5, build_model=build_logistic_regression_model)` | 6 | Trains/tests whichever model `build_model` constructs (logistic regression by default, or `build_gradient_boosting_model`) across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
+| `src/model.py` | `build_logistic_regression_model()` / `build_gradient_boosting_model()` | 6 | Each returns a fresh, untrained model - a `StandardScaler` + `LogisticRegression` pipeline, or a `GradientBoostingClassifier`. Passed into `train_and_evaluate()` to pick which model gets walk-forward validated. |
+| `src/model.py` | `print_feature_weights(features, target)` / `print_feature_importances(features, target)` | 6 | Fit one logistic regression / gradient boosting model on all the data and print every feature's learned weight (signed, standardized) or importance (unsigned, sums to 1.0), respectively. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,
