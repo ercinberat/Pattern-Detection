@@ -75,15 +75,39 @@ FEATURE_COLUMNS = [
     "indicator5_is_outperforming_benchmark",
 ]
 
+# The 9 continuous/ratio-style features out of FEATURE_COLUMNS above -
+# everything except the 12 True/False confirmation flags. Split out as
+# its own list to directly test a hypothesis gradient boosting's feature
+# importances raised (see PLAN.md's Stage 6 notes): those 12 booleans
+# accounted for only 2.8% of its total importance combined, so maybe the
+# raw indicator readings carry the real signal and the hand-picked
+# True/False thresholds are just discarding information, not adding any.
+CONTINUOUS_FEATURE_COLUMNS = [
+    "indicator1_band_width_pct",
+    "indicator1_band_width_percentile",
+    "indicator1_volume_ratio",
+    "indicator2_adx",
+    "indicator2_plus_di",
+    "indicator2_minus_di",
+    "indicator4_rsi",
+    "indicator5_pct_from_52_week_high",
+    "indicator5_relative_strength",
+]
+
 TARGET_COLUMN = "is_successful"
 
 
-def load_training_data(csv_path: str = "data/breakout_labeled_patterns.csv"):
+def load_training_data(csv_path: str = "data/breakout_labeled_patterns.csv", feature_columns: list = None):
     """
     Load scripts/build_breakout_dataset.py's output and prepare it for
-    training: pick out FEATURE_COLUMNS plus a pattern_type feature, drop
+    training: pick out feature_columns plus a pattern_type feature, drop
     any pattern missing a feature value, and sort everything by
     entry_date so later code can split it into chronological folds.
+
+    feature_columns: which indicator columns to use - FEATURE_COLUMNS
+        (the default, if not given) for every feature, or
+        CONTINUOUS_FEATURE_COLUMNS to test the 12 True/False confirmation
+        flags' own contribution by leaving them out entirely.
 
     A pattern is missing indicator5_relative_strength (needs 63 prior
     trading days of history) far more often than any other feature - see
@@ -95,14 +119,20 @@ def load_training_data(csv_path: str = "data/breakout_labeled_patterns.csv"):
     same-order pandas objects: a DataFrame of feature columns, a Series
     of True/False labels, and a Series of entry dates for splitting.
     """
+    if feature_columns is None:
+        feature_columns = FEATURE_COLUMNS
+
     dataset = pd.read_csv(csv_path)
     dataset["entry_date"] = pd.to_datetime(dataset["entry_date"], utc=True)
 
     # A pattern's type is known before its outcome, so it's a legitimate
     # feature - encoded as a single True/False column since there are
-    # only two pattern types.
+    # only two pattern types. Kept in both the full and continuous-only
+    # feature sets, since it isn't one of the 12 confirmation flags being
+    # tested - it's which pattern shape was detected, not a signal about
+    # whether the breakout will hold.
     dataset["is_bull_flag_pattern"] = dataset["pattern_type"] == "bull_flag"
-    feature_columns_with_pattern_type = FEATURE_COLUMNS + ["is_bull_flag_pattern"]
+    feature_columns_with_pattern_type = feature_columns + ["is_bull_flag_pattern"]
 
     dataset = dataset.dropna(subset=feature_columns_with_pattern_type)
     dataset = dataset.sort_values("entry_date").reset_index(drop=True)
@@ -292,10 +322,19 @@ def _print_fold_results(model_name: str, fold_results: pd.DataFrame) -> None:
     )
 
 
-if __name__ == "__main__":
-    features, target, entry_dates = load_training_data()
-    print(f"Loaded {len(features)} patterns with complete features, {entry_dates.min().date()} to {entry_dates.max().date()}")
-    print(f"Overall win rate: {target.mean():.1%}\n")
+def _run_comparison(feature_set_name: str, feature_columns: list) -> dict:
+    """
+    Load the data with the given feature_columns, train+evaluate both
+    models, print their per-fold tables, and return each model's mean
+    ROC-AUC so _run_comparison()'s caller can put every feature
+    set/model combination side by side in one final summary table.
+    """
+    features, target, entry_dates = load_training_data(feature_columns=feature_columns)
+    print(
+        f"=== Feature set: {feature_set_name} ({len(feature_columns) + 1} features) === "
+        f"{len(features)} patterns, {entry_dates.min().date()} to {entry_dates.max().date()}, "
+        f"overall win rate {target.mean():.1%}\n"
+    )
 
     logistic_regression_results = train_and_evaluate(features, target, build_model=build_logistic_regression_model)
     _print_fold_results("Logistic regression", logistic_regression_results)
@@ -303,11 +342,29 @@ if __name__ == "__main__":
     gradient_boosting_results = train_and_evaluate(features, target, build_model=build_gradient_boosting_model)
     _print_fold_results("Gradient boosting", gradient_boosting_results)
 
-    print(
-        f"Mean ROC-AUC comparison: logistic regression {logistic_regression_results['roc_auc'].mean():.3f} "
-        f"vs. gradient boosting {gradient_boosting_results['roc_auc'].mean():.3f}\n"
-    )
+    return {
+        "feature_set": feature_set_name,
+        "logistic_regression_roc_auc": logistic_regression_results["roc_auc"].mean(),
+        "gradient_boosting_roc_auc": gradient_boosting_results["roc_auc"].mean(),
+    }
 
+
+if __name__ == "__main__":
+    # Run the same two models on two feature sets - every feature, and
+    # just the 9 continuous/ratio ones with all 12 confirmation booleans
+    # left out - to test the hypothesis gradient boosting's feature
+    # importances raised: that those booleans might be pure noise riding
+    # along with the continuous readings, not adding real signal.
+    summary_rows = [
+        _run_comparison("All features", FEATURE_COLUMNS),
+        _run_comparison("Continuous only (no confirmation flags)", CONTINUOUS_FEATURE_COLUMNS),
+    ]
+
+    print("=== Summary: mean ROC-AUC by feature set ===")
+    print(pd.DataFrame(summary_rows).to_string(index=False, float_format="{:.3f}".format))
+
+    print()
+    features, target, _ = load_training_data()
     print_feature_weights(features, target)
     print()
     print_feature_importances(features, target)

@@ -646,15 +646,31 @@ Plus swing-trading-specific features:
         might be throwing away information, not just measuring it at
         the wrong time (Stage 3's finding) or in a mixed direction
         (this stage's logistic-regression finding).
+    - **Tested the "continuous features carry more signal than the
+      booleans" hypothesis directly - confirmed.** `load_training_data()`
+      now takes a `feature_columns` argument;
+      `CONTINUOUS_FEATURE_COLUMNS` (the same 9 continuous/ratio features
+      gradient boosting leaned on) is a second option alongside
+      `FEATURE_COLUMNS` (all 22). Running both models on both feature
+      sets:
+      | Feature set | Logistic regression | Gradient boosting |
+      |---|---|---|
+      | All 22 features | 0.554 | 0.543 |
+      | Continuous only (10) | **0.561** | 0.542 |
+      Dropping all 12 boolean confirmation flags didn't hurt either
+      model - logistic regression's mean ROC-AUC actually improved
+      slightly, and gradient boosting was essentially unchanged (expected,
+      since it already gave them ~0 importance). On this dataset, the 12
+      hand-picked True/False thresholds really do look like noise the
+      continuous readings underneath them already capture better -
+      not proof they're worthless in general, but real evidence against
+      them adding anything beyond the raw numbers here.
     - **Next steps, not yet done:** imputing
       `indicator5_relative_strength` instead of dropping those 68 rows;
       trying real XGBoost/LightGBM now that scikit-learn's version shows
-      gradient boosting is at least worth pursuing further; testing the
-      "continuous features carry more signal than the booleans"
-      hypothesis directly (e.g. a model using only the continuous
-      features, no boolean flags at all); and Stage 7's backtesting to
-      translate "this model's probability score" into an actual
-      position-taking strategy.
+      gradient boosting is at least worth pursuing further; and Stage 7's
+      backtesting to translate "this model's probability score" into an
+      actual position-taking strategy.
 
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage

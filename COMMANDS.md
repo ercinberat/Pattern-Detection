@@ -245,12 +245,18 @@ never a random split.
 python -m src.model
 ```
 
-Prints, per model, per fold: how many patterns were in the training/test
-split, the test fold's actual win rate (the baseline to beat), the win
-rate among patterns the model called "will succeed," the win rate among
-just the 20% of patterns it was most confident about, and the standard
-accuracy/precision/recall/ROC-AUC metrics - then each model's own view of
-which features mattered, fit on all the data at once: logistic
+Runs both models on two feature sets in turn - `FEATURE_COLUMNS` (all 22
+features) and `CONTINUOUS_FEATURE_COLUMNS` (just the 9 continuous/ratio
+readings, with all 12 True/False confirmation flags left out) - to test
+whether those flags add anything beyond the raw numbers underneath them
+(see `PLAN.md`'s Stage 6 notes: on this dataset, they don't). Prints,
+per model, per fold: how many patterns were in the training/test split,
+the test fold's actual win rate (the baseline to beat), the win rate
+among patterns the model called "will succeed," the win rate among just
+the 20% of patterns it was most confident about, and the standard
+accuracy/precision/recall/ROC-AUC metrics - then a summary table of mean
+ROC-AUC by feature set and model, and finally each model's own view of
+which features mattered (fit on the full feature set): logistic
 regression's learned weight per feature (which direction, and how much,
 each one pushes the prediction), and gradient boosting's feature
 importances (how much each feature reduced prediction error, with no
@@ -294,7 +300,7 @@ see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
 | `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY")` | 6 | Runs detection + labeling + all 5 indicator combinations across a list of tickers and combines every labeled pattern (with features) into one DataFrame, skipping tickers that fail to fetch. See above. |
 | `scripts/measure_indicator_lag.py` | `measure_indicator_lag(tickers, period="2y", benchmark_ticker="SPY", max_search_days=20)` | 3/6 | Recomputes every indicator combination's confirmation flags at both a pattern's `end_date` and its real breakout day, for every labeled pattern across a list of tickers. See above. |
 | `scripts/build_breakout_dataset.py` | `build_breakout_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY", max_search_days=20)` | 6 | Like `build_labeled_dataset()`, but every indicator combination's features are computed at each pattern's real breakout day instead of `end_date`/`flag_end_date`; patterns with no breakout found are dropped. See above. |
-| `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv")` | 6 | Loads the training dataset, keeps only scale-independent feature columns plus pattern type, drops rows missing a feature, sorts by `entry_date`. See above. |
+| `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv", feature_columns=None)` | 6 | Loads the training dataset, keeps `feature_columns` (defaults to `FEATURE_COLUMNS`; pass `CONTINUOUS_FEATURE_COLUMNS` to drop the 12 confirmation booleans) plus pattern type, drops rows missing a feature, sorts by `entry_date`. See above. |
 | `src/model.py` | `train_and_evaluate(features, target, n_splits=5, build_model=build_logistic_regression_model)` | 6 | Trains/tests whichever model `build_model` constructs (logistic regression by default, or `build_gradient_boosting_model`) across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
 | `src/model.py` | `build_logistic_regression_model()` / `build_gradient_boosting_model()` | 6 | Each returns a fresh, untrained model - a `StandardScaler` + `LogisticRegression` pipeline, or a `GradientBoostingClassifier`. Passed into `train_and_evaluate()` to pick which model gets walk-forward validated. |
 | `src/model.py` | `print_feature_weights(features, target)` / `print_feature_importances(features, target)` | 6 | Fit one logistic regression / gradient boosting model on all the data and print every feature's learned weight (signed, standardized) or importance (unsigned, sums to 1.0), respectively. |
