@@ -117,6 +117,7 @@ class BullFlagPattern:
     pole_return_pct: float
     flag_range_pct: float
     flag_volume_ratio: float
+    retracement_pct: float  # how much of the pole's gain the flag gave back before this pattern qualified
 
 
 def pattern_evaluation_date(pattern) -> pd.Timestamp:
@@ -582,6 +583,7 @@ def detect_bull_flags(
                 pole_return_pct=pole_return_pct,
                 flag_range_pct=flag_range_pct,
                 flag_volume_ratio=flag_volume_ratio,
+                retracement_pct=retracement_pct,
             )
         )
 

@@ -233,12 +233,23 @@ def run_smoke_test(ticker: str = "AAPL", benchmark_ticker: str = "SPY") -> bool:
         temp_csv.close()
         model_dataset.to_csv(temp_csv.name, index=False)
 
-        features, target, entry_dates = load_training_data(temp_csv.name)
+        features, target, entry_dates, return_pct = load_training_data(temp_csv.name)
         fold_results = train_and_evaluate(features, target, n_splits=2)
         check(
             f"model trains and validates across walk-forward folds ({len(features)} patterns, "
             f"{len(fold_results)} folds)",
             len(fold_results) == 2 and {"roc_auc", "baseline_win_rate"} <= set(fold_results.columns),
+        )
+
+        from src.model import build_linear_regression_model, train_and_evaluate_regression
+
+        regression_fold_results = train_and_evaluate_regression(
+            features, return_pct, n_splits=2, build_model=build_linear_regression_model
+        )
+        check(
+            f"magnitude-aware regression trains and validates across walk-forward folds "
+            f"({len(regression_fold_results)} folds)",
+            len(regression_fold_results) == 2 and {"correlation", "baseline_mean_return"} <= set(regression_fold_results.columns),
         )
     except Exception as error:
         print(f"    exception: {error}")

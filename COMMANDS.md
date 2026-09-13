@@ -210,6 +210,7 @@ rather than a different trading strategy.
 
 ```
 python -m scripts.build_breakout_dataset                          # full S&P 500, ~2y each, saves to data/breakout_labeled_patterns.csv
+python -m scripts.build_breakout_dataset --period 5y                # more history per ticker, more (and more varied) patterns to train on
 python -m scripts.build_breakout_dataset --limit 20                # quick test run on the first 20 tickers only
 python -m scripts.build_breakout_dataset --max-search-days 10      # give up looking for a breakout sooner
 python -m scripts.build_breakout_dataset --output data/other.csv   # save somewhere else
@@ -228,46 +229,66 @@ its trade actually enters on - an earlier version used a looser,
 different search for features than for entry, which disagreed on 22% of
 rows (see `PLAN.md`'s Stage 6 notes).
 
+Also attaches, per row: Stage 3's own geometric pattern-quality measures
+(`pattern_high_r_squared`/`pattern_low_r_squared`/`pattern_contraction_pct`
+for triangles, `pattern_pole_return_pct`/`pattern_flag_volume_ratio`/
+`pattern_retracement_pct` for bull flags - 0 for whichever three don't
+apply to that row's `pattern_type`), and two market-regime descriptors
+from the benchmark ticker's own price series
+(`market_pct_from_50d_average`, `market_20d_volatility_pct` - see
+`_compute_market_regime_series()`). The pattern-quality
+measures were computed all along, inside `detect_triangles()`/
+`detect_bull_flags()`, but never reached the model until now; the
+market-regime descriptors are new. See `PLAN.md`'s Stage 6 notes.
+
 ### `src/model.py` — Stage 6's models
 
-Two models predicting whether a pattern's breakout will hit its target
-before its stop, trained on `data/breakout_labeled_patterns.csv`'s
-indicator features and compared side by side: a logistic regression
-(picked first because its learned weights can be read directly, rather
-than staying a black box) and a gradient boosting classifier (picked
-second as a more flexible model that can pick up on interactions between
-features). Both run through the same walk-forward validation - 5
-chronological folds (`sklearn.TimeSeriesSplit`) - each fold tested only
-on trades that happen after everything its own training data covers,
-never a random split.
+Two classifiers predicting whether a pattern's breakout will hit its
+target before its stop, trained on `data/breakout_labeled_patterns.csv`'s
+features and compared side by side: a logistic regression (picked first
+because its learned weights can be read directly, rather than staying a
+black box) and a gradient boosting classifier (picked second as a more
+flexible model that can pick up on interactions between features). Two
+regressors - the magnitude-aware counterparts, predicting `return_pct`
+directly instead of the binary target - are also trained and compared.
+All four run through the same walk-forward validation - 5 chronological
+folds (`sklearn.TimeSeriesSplit`) - each fold tested only on trades that
+happen after everything its own training data covers, never a random
+split.
 
 ```
 python -m src.model
 ```
 
-Runs both models on two feature sets in turn - `FEATURE_COLUMNS` (all 22
-features) and `CONTINUOUS_FEATURE_COLUMNS` (just the 9 continuous/ratio
-readings, with all 12 True/False confirmation flags left out) - to test
-whether those flags add anything beyond the raw numbers underneath them
-(see `PLAN.md`'s Stage 6 notes: on this dataset, they don't). Prints,
-per model, per fold: how many patterns were in the training/test split,
-the test fold's actual win rate (the baseline to beat), the win rate
-among patterns the model called "will succeed," the win rate among just
-the 20% of patterns it was most confident about, and the standard
+Runs both classifiers on two feature sets in turn - `FEATURE_COLUMNS`
+(every feature) and `CONTINUOUS_FEATURE_COLUMNS` (just the continuous/
+ratio readings, with all 12 True/False confirmation flags left out) - to
+test whether those flags add anything beyond the raw numbers underneath
+them (see `PLAN.md`'s Stage 6 notes: on the original feature set, they
+didn't). Both classifiers are wrapped in `GridSearchCV`, searching
+hyperparameters *inside* each outer walk-forward fold's own training
+data (nested, chronological tuning - see `build_logistic_regression_model()`/
+`build_gradient_boosting_model()`'s docstrings for why nesting matters).
+Prints, per model, per fold: how many patterns were in the training/test
+split, the test fold's actual win rate (the baseline to beat), the win
+rate among patterns the model called "will succeed," the win rate among
+just the 20% of patterns it was most confident about, and the standard
 accuracy/precision/recall/ROC-AUC metrics - then a summary table of mean
-ROC-AUC by feature set and model, and finally each model's own view of
-which features mattered (fit on the full feature set): logistic
-regression's learned weight per feature (which direction, and how much,
-each one pushes the prediction), and gradient boosting's feature
-importances (how much each feature reduced prediction error, with no
-direction - see `PLAN.md`'s Stage 6 notes for why these two views
-disagree sharply on which features matter, a real finding in its own
-right).
+ROC-AUC by feature set and model, each model's own view of which
+features mattered (fit on the full feature set): logistic regression's
+learned weight per feature and gradient boosting's feature importances
+(see `PLAN.md`'s Stage 6 notes for why these two views disagree sharply
+on which features matter) - and finally the two regressors' walk-forward
+results (baseline mean return, mean return among the top 20% predicted,
+and the correlation between predicted and actual return per fold).
 
-Patterns missing a feature value (mostly
-`indicator5_relative_strength`, which needs 63 prior trading days of
-history) are dropped rather than filled in, as the simplest first pass -
-see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
+Two columns (`indicator5_relative_strength`,
+`market_pct_from_50d_average`) are imputed with a neutral fill value
+(`IMPUTED_FEATURE_FILL_VALUES`) rather than dropped wherever they're
+missing only because a pattern's breakout landed too early in its own
+fetched history for that column's lookback to be complete - any other
+missing feature still causes that row to be dropped, as the simplest
+first pass. See `PLAN.md`'s Stage 6 notes for the exact counts.
 
 ---
 
@@ -280,7 +301,7 @@ see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
 | `src/patterns.py` | `find_pivots(price_data, order=5)` | 2 | Finds swing highs/lows using a fractal (rolling-extrema) method. |
 | `src/patterns.py` | `detect_triangles(pivots, window=40, ...)` | 3 | Fits trendlines to swing highs/lows in a sliding window, classifies converging shapes as symmetrical/ascending/descending. Returns every overlapping window candidate, unfiltered. |
 | `src/patterns.py` | `deduplicate_triangles(triangles)` | 3 (chart helper) | Collapses overlapping triangle candidates down to the single best-fitting one per cluster, purely to keep charts readable. |
-| `src/patterns.py` | `detect_bull_flags(price_data, pole_lookback=10, ...)` | 3 | Finds a sharp pole move followed by a tight, low-volume flag consolidation. Returns every overlapping candidate, unfiltered. |
+| `src/patterns.py` | `detect_bull_flags(price_data, pole_lookback=10, ...)` | 3 | Finds a sharp pole move followed by a tight, low-volume flag consolidation. Returns every overlapping candidate, unfiltered. `BullFlagPattern.retracement_pct` (how much of the pole's gain the flag gave back) is stored on the result now, not just used internally to filter. |
 | `src/patterns.py` | `deduplicate_bull_flags(bull_flags)` | 3 (chart helper) | Collapses overlapping bull-flag candidates down to the one with the strongest pole per cluster, purely to keep charts and datasets clean. |
 | `src/patterns.py` | `find_breakout_date(price_data, pattern, max_search_days=20, direction=None, require_full_candle=False)` | 3 | Finds the first bar where price actually crosses a triangle's trendlines or a bull flag's box, as opposed to `end_date`/`flag_end_date` which is just the detection window's last bar. `direction=None` (default) stops at the first cross in either direction; `direction="up"`/`"down"` searches only that direction, skipping past an opposite-direction cross rather than stopping there. `require_full_candle=True` requires the candle's Low/High (not just its Close) to clear the line - a stricter confirmation. A cross is never reported before the pivots defining that line have actually happened (`TrianglePattern.last_high_pivot_date`/`last_low_pivot_date`), to avoid lookahead bias. Returns `{"breakout_date", "direction"}` or `None`. |
 | `src/patterns.py` | `pattern_as_of_breakout(pattern, breakout_date)` | 3 | Returns a copy of a pattern with its evaluation date moved to `breakout_date`, so it plugs into the existing indicator/labeling functions unchanged. |
@@ -300,10 +321,12 @@ see `PLAN.md`'s Stage 6 notes for the exact count and what to try next.
 | `scripts/build_dataset.py` | `build_labeled_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY")` | 6 | Runs detection + labeling + all 5 indicator combinations across a list of tickers and combines every labeled pattern (with features) into one DataFrame, skipping tickers that fail to fetch. See above. |
 | `scripts/measure_indicator_lag.py` | `measure_indicator_lag(tickers, period="2y", benchmark_ticker="SPY", max_search_days=20)` | 3/6 | Recomputes every indicator combination's confirmation flags at both a pattern's `end_date` and its real breakout day, for every labeled pattern across a list of tickers. See above. |
 | `scripts/build_breakout_dataset.py` | `build_breakout_dataset(tickers, period="2y", pivot_order=5, benchmark_ticker="SPY", max_search_days=20)` | 6 | Like `build_labeled_dataset()`, but every indicator combination's features are computed at each pattern's real breakout day instead of `end_date`/`flag_end_date`; patterns with no breakout found are dropped. See above. |
-| `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv", feature_columns=None)` | 6 | Loads the training dataset, keeps `feature_columns` (defaults to `FEATURE_COLUMNS`; pass `CONTINUOUS_FEATURE_COLUMNS` to drop the 12 confirmation booleans) plus pattern type, drops rows missing a feature, sorts by `entry_date`. See above. |
-| `src/model.py` | `train_and_evaluate(features, target, n_splits=5, build_model=build_logistic_regression_model)` | 6 | Trains/tests whichever model `build_model` constructs (logistic regression by default, or `build_gradient_boosting_model`) across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
-| `src/model.py` | `build_logistic_regression_model()` / `build_gradient_boosting_model()` | 6 | Each returns a fresh, untrained model - a `StandardScaler` + `LogisticRegression` pipeline, or a `GradientBoostingClassifier`. Passed into `train_and_evaluate()` to pick which model gets walk-forward validated. |
-| `src/model.py` | `print_feature_weights(features, target)` / `print_feature_importances(features, target)` | 6 | Fit one logistic regression / gradient boosting model on all the data and print every feature's learned weight (signed, standardized) or importance (unsigned, sums to 1.0), respectively. |
+| `src/model.py` | `load_training_data(csv_path="data/breakout_labeled_patterns.csv", feature_columns=None)` | 6 | Loads the training dataset, keeps `feature_columns` (defaults to `FEATURE_COLUMNS`; pass `CONTINUOUS_FEATURE_COLUMNS` to drop the 12 confirmation booleans) plus pattern type, imputes two columns (`IMPUTED_FEATURE_FILL_VALUES`) and drops rows still missing a feature, sorts by `entry_date`. Returns `(features, target, entry_dates, return_pct)`. See above. |
+| `src/model.py` | `train_and_evaluate(features, target, n_splits=5, build_model=build_logistic_regression_model)` | 6 | Trains/tests whichever classifier `build_model` constructs across 5 chronological walk-forward folds; returns each fold's win-rate and classification metrics. See above. |
+| `src/model.py` | `train_and_evaluate_regression(features, return_pct, n_splits=5, build_model=build_linear_regression_model)` | 6 | Same walk-forward idea, but for a regressor predicting `return_pct` directly - returns each fold's baseline/top-20%-predicted mean return and the predicted-vs-actual correlation. See above. |
+| `src/model.py` | `build_logistic_regression_model()` / `build_gradient_boosting_model()` | 6 | Each returns a fresh, untrained `GridSearchCV`-wrapped classifier (`class_weight="balanced"` logistic regression tuning `C`, or a `GradientBoostingClassifier` tuning tree depth/learning rate/tree count/leaf size) - the search is nested inside whichever outer walk-forward fold calls `.fit()` on it. |
+| `src/model.py` | `build_linear_regression_model()` / `build_gradient_boosting_regressor()` | 6 | The magnitude-aware counterparts - a `StandardScaler` + `LinearRegression` pipeline, or a `GradientBoostingRegressor` - passed into `train_and_evaluate_regression()`. Not hyperparameter-tuned, unlike the classifiers above. |
+| `src/model.py` | `print_feature_weights(features, target)` / `print_feature_importances(features, target)` | 6 | Fit one logistic regression / gradient boosting model (via its `GridSearchCV` wrapper's `.best_estimator_`) on all the data and print every feature's learned weight (signed, standardized) or importance (unsigned, sums to 1.0), respectively. |
 
 All threshold values in `detect_triangles`/`detect_bull_flags`, every
 indicator combination, and the labeling exit rule are first-pass guesses,

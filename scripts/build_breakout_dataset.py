@@ -32,6 +32,7 @@ from scripts.fetch_real_data import fetch_daily_price_history, fetch_sp500_ticke
 from src.indicators import INDICATOR_COMBINATIONS
 from src.labeling import label_patterns
 from src.patterns import (
+    TrianglePattern,
     deduplicate_bull_flags,
     deduplicate_triangles,
     detect_bull_flags,
@@ -47,6 +48,38 @@ from src.patterns import (
 # S&P 500 ETF) is used as a general-market benchmark, same as
 # build_dataset.py and main.py.
 _DEFAULT_BENCHMARK_TICKER = "SPY"
+
+
+def _compute_market_regime_series(benchmark_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Two simple descriptors of the broader market's own condition, from
+    the benchmark ticker's (SPY by default) own price series. Every
+    other feature in this dataset describes one stock in isolation at
+    one moment - nothing captures whether the market itself is trending
+    or choppy right now, which plausibly affects whether an individual
+    breakout follows through (see PLAN.md's Stage 6 notes).
+
+    market_pct_from_50d_average: how far SPY's Close sits above (positive)
+        or below (negative) its own 50-day moving average, as a % - a
+        simple "is the market itself in an uptrend" measure. 50 days is a
+        medium-term window, roughly 2.5 trading months.
+    market_20d_volatility_pct: the standard deviation of SPY's daily %
+        returns over the last 20 trading days - a simple realized-
+        volatility measure. Higher means choppier, more uncertain recent
+        conditions market-wide.
+    """
+    fifty_day_average = benchmark_data["Close"].rolling(window=50).mean()
+    pct_from_50_day_average = (benchmark_data["Close"] - fifty_day_average) / fifty_day_average * 100
+
+    daily_return_pct = benchmark_data["Close"].pct_change() * 100
+    twenty_day_volatility = daily_return_pct.rolling(window=20).std()
+
+    return pd.DataFrame(
+        {
+            "market_pct_from_50d_average": pct_from_50_day_average,
+            "market_20d_volatility_pct": twenty_day_volatility,
+        }
+    )
 
 
 def build_breakout_dataset(
@@ -71,17 +104,32 @@ def build_breakout_dataset(
         pattern's existing label, unchanged), end_date (the detection
         window's own evaluation date, kept for reference/comparison),
         breakout_date, breakout_direction, lag_days (calendar days
-        between end_date and breakout_date), plus every indicator
-        combination's feature columns, prefixed "indicator{N}_" exactly
-        like build_labeled_dataset() - but computed at breakout_date.
+        between end_date and breakout_date), pattern_high_r_squared/
+        pattern_low_r_squared/pattern_contraction_pct (triangles) and
+        pattern_pole_return_pct/pattern_flag_volume_ratio/
+        pattern_retracement_pct (bull flags) - Stage 3's own geometric
+        quality measures, 0 for whichever pair of fields doesn't apply to
+        that row's pattern_type, market_pct_from_50d_average/
+        market_20d_volatility_pct (see _compute_market_regime_series()),
+        plus every indicator combination's feature columns, prefixed
+        "indicator{N}_" exactly like build_labeled_dataset() - but
+        computed at breakout_date.
     """
     benchmark_data = fetch_daily_price_history(benchmark_ticker, period=period)
+    market_regime_series = _compute_market_regime_series(benchmark_data)
     all_rows = []
     dropped_no_breakout = 0
 
     for ticker_index, ticker in enumerate(tickers, start=1):
         try:
             price_data = fetch_daily_price_history(ticker, period=period)
+            # The benchmark and this ticker don't always share the exact
+            # same trading calendar (a holiday observed on one exchange
+            # but not another, a listing gap, etc.) - reindexing onto
+            # this ticker's own dates and forward-filling means every
+            # pattern can look up a market-regime value even on a date
+            # SPY itself didn't have a fresh bar for.
+            ticker_market_regime = market_regime_series.reindex(price_data.index).ffill()
             pivots = find_pivots(price_data, order=pivot_order)
             triangles = deduplicate_triangles(detect_triangles(pivots))
             bull_flags = deduplicate_bull_flags(detect_bull_flags(price_data))
@@ -119,6 +167,38 @@ def build_breakout_dataset(
             end_date = pattern_evaluation_date(pattern)
             pattern_at_breakout = pattern_as_of_breakout(pattern, breakout["breakout_date"])
 
+            # Stage 3 already computes how *well-formed* a pattern is
+            # (trendline fit, contraction, pole strength) but that
+            # quality information never reached the model before now - a
+            # barely-qualifying pattern and a tight, clean one looked
+            # identical. Triangles and bull flags are described by
+            # different geometry, so a triangle row gets 0 for the
+            # bull-flag-only fields and vice versa - 0 sits clearly
+            # outside either field's real range (triangle r² requires
+            # >=0.6 to qualify at all; a bull flag's pole_return_pct
+            # requires >=15 by construction), so it reads as "not
+            # applicable to this pattern type", not as a real low value.
+            is_triangle = isinstance(pattern, TrianglePattern)
+            geometric_quality = (
+                {
+                    "pattern_high_r_squared": pattern.high_r_squared,
+                    "pattern_low_r_squared": pattern.low_r_squared,
+                    "pattern_contraction_pct": pattern.contraction_pct,
+                    "pattern_pole_return_pct": 0.0,
+                    "pattern_flag_volume_ratio": 0.0,
+                    "pattern_retracement_pct": 0.0,
+                }
+                if is_triangle
+                else {
+                    "pattern_high_r_squared": 0.0,
+                    "pattern_low_r_squared": 0.0,
+                    "pattern_contraction_pct": 0.0,
+                    "pattern_pole_return_pct": pattern.pole_return_pct,
+                    "pattern_flag_volume_ratio": pattern.flag_volume_ratio,
+                    "pattern_retracement_pct": pattern.retracement_pct,
+                }
+            )
+
             row = {
                 "ticker": ticker,
                 "pattern_type": label["pattern_type"],
@@ -133,6 +213,9 @@ def build_breakout_dataset(
                 "breakout_date": breakout["breakout_date"],
                 "breakout_direction": breakout["direction"],
                 "lag_days": (breakout["breakout_date"] - end_date).days,
+                **geometric_quality,
+                "market_pct_from_50d_average": ticker_market_regime["market_pct_from_50d_average"].loc[breakout["breakout_date"]],
+                "market_20d_volatility_pct": ticker_market_regime["market_20d_volatility_pct"].loc[breakout["breakout_date"]],
             }
 
             for indicator_number, combination in INDICATOR_COMBINATIONS.items():

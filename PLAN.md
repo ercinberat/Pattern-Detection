@@ -672,6 +672,210 @@ Plus swing-trading-specific features:
       backtesting to translate "this model's probability score" into an
       actual position-taking strategy.
 
+  - **Before moving to Stage 7: model-improvement options to try first,
+    from a review of the current numbers and code (not yet implemented).**
+    The reasoning behind flagging this now, before backtesting: mean
+    ROC-AUC is 0.554 (barely above the 0.5 coin-flip baseline), the
+    win rate (25.0%) sits below the ~33% breakeven the fixed 10%/5%
+    target/stop needs before any trading costs, and Stage 7 hasn't been
+    built yet - so there's no evidence yet that backtesting a model this
+    weak would be informative rather than just confirming it loses money
+    once real costs are added. The options below aim to find out whether
+    there's more real signal to extract before spending Stage 7 effort on
+    it. Roughly in priority order:
+    1. **Add Stage 3's own pattern-quality metrics as model features -
+       currently unused entirely.** `FEATURE_COLUMNS` in `src/model.py`
+       is built only from Stage 4's indicator confirmation features - it
+       never includes the geometric quality numbers already computed and
+       sitting on every pattern object: a triangle's `high_r_squared`,
+       `low_r_squared`, and `contraction_pct` (`TrianglePattern`), or a
+       bull flag's `pole_return_pct`, `flag_volume_ratio`, and
+       `retracement_pct` (`BullFlagPattern`), all in `src/patterns.py`. A
+       barely-qualifying triangle and a tight, well-fit one currently
+       look identical to the model. This is free information (no new
+       indicator to build) and the highest-priority thing to try.
+    2. **The binary label throws away outcome magnitude.**
+       `is_successful` is strictly `exit_reason == "target"` - a pattern
+       that timed out at +9% counts identically to one stopped out at
+       -5%. Worth trying: training on `return_pct` directly (regression)
+       instead of, or alongside, the binary target, or keeping the
+       three-way outcome (target/stop/time) rather than collapsing it
+       before the model ever sees it.
+    3. **Neither model has been tuned - the current comparison may not be
+       fair.** `build_gradient_boosting_model()` is
+       `GradientBoostingClassifier(random_state=0)` with every
+       hyperparameter (learning rate, tree depth, number of trees,
+       min samples per leaf) left at scikit-learn's defaults;
+       `build_logistic_regression_model()` uses default L2
+       regularization with no `class_weight` adjustment despite the
+       ~25%/75% label imbalance. A proper hyperparameter search (done
+       *inside* each walk-forward fold, never across folds, to avoid
+       leaking future information into the search itself) hasn't been
+       tried on either model.
+    4. **The dataset may just be thin for what's being asked of it.**
+       1,173 complete rows across 22 features, with fold-to-fold ROC-AUC
+       swinging from 0.427 to 0.624 - consistent with not enough stable
+       examples for a model (especially gradient boosting's interaction
+       terms) to learn a robust pattern yet. Two cheap levers: rebuild
+       with `--period 5y` instead of `2y` (more patterns, and more
+       varied market regimes than whatever one stretch the last 2 years
+       happened to be) and do the `indicator5_relative_strength`
+       imputation already listed above instead of dropping those rows.
+    5. **No feature describes the broader market backdrop.** All 22
+       current features describe one ticker in isolation at one moment -
+       nothing captures whether the broad market itself is trending or
+       choppy right now (e.g. SPY's own trend state, recent realized
+       volatility). Breakout follow-through plausibly depends on this,
+       and it's invisible to the model as it stands.
+    6. **Caveat to keep in mind, not necessarily fixable:** all tickers'
+       patterns are pooled and split purely by `entry_date` via
+       `TimeSeriesSplit`. That's correct against lookahead bias, but
+       patterns from different tickers on overlapping calendar dates are
+       often correlated (the same broad market move), not independent
+       draws - so a fold's effective independent sample size is probably
+       smaller than its row count suggests, which may explain some of the
+       fold-to-fold ROC-AUC swings above rather than pure noise.
+    7. **Stage 3's own detection thresholds are still unvalidated against
+       outcomes** (`min_r_squared`, `min_contraction_pct`, the bull-flag
+       pole/volume/retracement cutoffs - see this file's Stage 3 "Next"
+       note). If a meaningful share of detected triangles/flags are
+       marginal, noisy shapes, no amount of modeling downstream fixes
+       that - now that a labeled dataset exists, sweeping these against
+       real outcomes has become possible and is worth doing before
+       treating the model's ceiling as final.
+    - **Suggested order:** (1) add the Stage 3 geometric features and
+      re-run `src/model.py` first - cheapest, and uses data that already
+      exists; then (4) impute `relative_strength` and rebuild with more
+      history; then (3) tune both models properly, or swap in real
+      XGBoost/LightGBM; then reconsider (2) a magnitude-aware target;
+      then (5) a market-regime feature or two; then (7) sweep Stage 3's
+      thresholds against the resulting labeled data. If ROC-AUC is still
+      close to 0.55 after this, that's a meaningfully stronger signal
+      that geometric-pattern-plus-indicator features have hit a real
+      ceiling for this problem - at which point Stage 7 backtesting
+      becomes about quantifying that modest edge net of real costs,
+      rather than the first place a weak model would get caught.
+    - **Implementation status: all 6 actionable items applied, by
+      request.** (Item 6 was a caveat to keep in mind, not something to
+      build.)
+      1. **Geometric quality features:** `TrianglePattern`'s
+         `high_r_squared`/`low_r_squared`/`contraction_pct` and a new
+         `BullFlagPattern.retracement_pct` field (computed in
+         `detect_bull_flags()` all along for its own filtering, but never
+         stored on the pattern until now) are written into
+         `build_breakout_dataset.py`'s output as
+         `pattern_high_r_squared`/`pattern_low_r_squared`/
+         `pattern_contraction_pct`/`pattern_pole_return_pct`/
+         `pattern_flag_volume_ratio`/`pattern_retracement_pct` - 0 for
+         whichever three don't apply to that row's `pattern_type` (0 sits
+         clearly outside either field's real qualifying range, so it
+         reads as "not applicable," not a real low value).
+      5. **Market-regime features:** `_compute_market_regime_series()` in
+         the same file adds `market_pct_from_50d_average` (how far SPY
+         sits above/below its own 50-day moving average) and
+         `market_20d_volatility_pct` (SPY's own 20-day realized
+         volatility) to every row, computed once per run and looked up
+         at each pattern's breakout date.
+      4. **Imputation + more history:** `src/model.py`'s
+         `IMPUTED_FEATURE_FILL_VALUES` fills `indicator5_relative_strength`
+         (1.0 - "in line with the benchmark") and
+         `market_pct_from_50d_average` (0.0 - "at its own average")
+         instead of dropping those rows, wherever they're missing only
+         because a pattern's breakout landed too early in its own fetched
+         history for that lookback to be complete. The dataset itself was
+         rebuilt with `--period 5y` instead of `2y`.
+      3. **Hyperparameter tuning:** `build_logistic_regression_model()`
+         now uses `class_weight="balanced"` (the label is ~25%/75%) and
+         searches `C` via `GridSearchCV`; `build_gradient_boosting_model()`
+         searches tree depth/learning rate/tree count/min leaf size the
+         same way. Both searches are nested *inside* each outer
+         walk-forward fold's own training data (`TimeSeriesSplit` as the
+         inner CV too), so tuning itself never sees data from after a
+         fold's test period - the same lookahead-bias guard the outer
+         validation already had, just extended to the tuning step.
+      2. **Magnitude-aware target:** `build_linear_regression_model()`/
+         `build_gradient_boosting_regressor()` and
+         `train_and_evaluate_regression()` predict `return_pct` directly
+         instead of the binary `is_successful`, walk-forward validated
+         the same way, reporting baseline mean return, the mean return
+         among the top 20% predicted, and the correlation between
+         predicted and actual return per fold.
+      7. **Stage 3 threshold sweep, as a data analysis rather than a
+         full re-detection grid search:** re-running `detect_triangles`/
+         `detect_bull_flags` across the whole S&P 500 for every candidate
+         threshold combination would mean many full-universe scans -
+         instead, item 1's newly-attached geometric quality columns let
+         this be answered directly from the existing labeled data:
+         correlate `pattern_contraction_pct`/combined r² (triangles) and
+         `pattern_pole_return_pct`/`pattern_retracement_pct` (bull flags)
+         against `return_pct`, to see whether the current thresholds are
+         anywhere near separating strong setups from weak ones.
+      - **Results, on the real `--period 5y` rebuild (3,261 patterns,
+        2021-10-20 to 2026-09-09, up from 1,241 at 2y - 2.6x more data,
+        overall win rate essentially unchanged at 25.4%):**
+        | Feature set | Logistic regression | Gradient boosting |
+        |---|---|---|
+        | All 30 features | 0.554 | 0.539 |
+        | Continuous only (18) | 0.560 | 0.545 |
+        **None of it moved the needle.** More data (2.6x), 8 new
+        features (pattern quality + market regime), and nested
+        hyperparameter tuning for both models produced mean ROC-AUC
+        numbers essentially identical to the original 22-feature,
+        1,241-pattern, untuned run (0.554/0.543 then vs. 0.554/0.539 now).
+        This is a real, if disappointing, result: it's meaningfully
+        stronger evidence than before that ~0.55 is close to this
+        problem's actual ceiling with pattern-geometry-plus-indicator
+        features, not a sign the earlier numbers were just undertrained
+        or undertuned.
+        - **The magnitude-aware regression is a genuine negative
+          result, not just a weaker positive one.** Both a linear
+          regression and a gradient boosting regressor predicting
+          `return_pct` directly came back with *negative* mean
+          correlation between predicted and actual return across the 5
+          folds (linear: -0.067; gradient boosting: -0.043) - worse than
+          no relationship at all. Ranking by predicted return and taking
+          the top 20% returned *less* than just taking every pattern
+          (+0.23%/+0.02% vs. a +0.98% baseline). The likely reason: the
+          fixed target/stop rule makes `return_pct` a heavily bimodal
+          distribution clustered at exactly +10% and exactly -5%, with a
+          scattered middle (time exits) - not the smooth, continuous
+          target a plain regression is built to fit well. The binary
+          `is_successful` target remains the one worth using.
+        - **The Stage 3 threshold-quality correlations split sharply by
+          pattern type - triangles and bull flags are not the same
+          story.** On the full dataset:
+          | Pattern type | Measure | vs. return_pct | vs. is_successful |
+          |---|---|---|---|
+          | Triangle (n=2,893) | combined r² | 0.007 | 0.001 |
+          | Triangle (n=2,893) | contraction % | 0.012 | 0.00002 |
+          | Bull flag (n=368) | pole return % | 0.148 | **0.220** |
+          | Bull flag (n=368) | retracement % | **-0.149** | -0.056 |
+          | Bull flag (n=368) | flag volume ratio | -0.005 | - |
+          For triangles, trendline fit quality and contraction amount
+          are essentially *unrelated* to outcome - a tight, clean,
+          well-fit triangle is no more likely to succeed than a marginal
+          one that barely cleared `min_r_squared`/`min_contraction_pct`.
+          For bull flags, pole strength and retracement genuinely do
+          matter (a stronger pole and less give-back both predict a
+          better outcome) - exactly the two thresholds
+          (`pole_min_return_pct`, `flag_max_retracement_pct`) that
+          gate detection in the first place, suggesting they're
+          measuring something real for this pattern type, unlike
+          triangles' `min_r_squared`/`min_contraction_pct`. This lines
+          up with what the models found on their own:
+          `pattern_pole_return_pct` got real weight/importance in both
+          classifiers, while the triangle-only geometric fields barely
+          registered.
+      - **Reading, now that all 6 items have been tried:** the ceiling
+        looks real, not a symptom of an unfinished pipeline. The
+        strongest concrete lead going forward isn't a better model - it's
+        that bull flags' geometric quality carries real signal that
+        triangles' doesn't, which argues for treating the two pattern
+        types as separate modeling problems (or at least separate
+        threshold-tuning problems) rather than one pooled dataset, and
+        for prioritizing bull-flag threshold tuning specifically before
+        assuming triangle geometry has nothing left to give.
+
 ### Stage 7 — Backtesting
 - Simulate entries on detected + confirmed patterns with realistic slippage
   and transaction costs.
